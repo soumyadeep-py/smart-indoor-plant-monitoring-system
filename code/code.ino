@@ -3,126 +3,94 @@
 #include <Wire.h>
 #include <LittleFS.h>
 #include <Preferences.h>
-
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
 #include <Adafruit_AHTX0.h>
 #include <BH1750.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-
 // ============================================================
 //                      PIN DEFINITIONS
 // ============================================================
-
 #define SOIL_PIN        34
-
 #define I2C_SDA        21
 #define I2C_SCL        22
-
 #define BUTTON_PIN     27
 #define OLED_LEFT_PIN  32
 #define OLED_RIGHT_PIN 4
 #define OLED_UP_PIN    16
 #define OLED_DOWN_PIN  17
-
 #define RGB_R_PIN      25
 #define RGB_G_PIN      26
 #define RGB_B_PIN      33
-
 #define BUZZER_PIN     14
-
-
 // ============================================================
 //                         OLED
 // ============================================================
-
 #define SCREEN_WIDTH   128
 #define SCREEN_HEIGHT   64
 #define OLED_RESET      -1
 #define OLED_ADDRESS    0x3C
-
 Adafruit_SSD1306 display(
   SCREEN_WIDTH,
   SCREEN_HEIGHT,
   &Wire,
   OLED_RESET
 );
-
 bool oledDetected = false;
-
-
 // ============================================================
 //                         SENSORS
 // ============================================================
-
 Adafruit_AHTX0 aht;
 BH1750 bh1750;
-
 bool ahtDetected  = false;
 bool bhDetected   = false;
-
-
 // ============================================================
 //                          WEB SERVER
 // ============================================================
-
 WebServer server(80);
-
 const char* AP_SSID     = "SmartPlant-ESP32";
 const char* AP_PASSWORD = "plant1234";
-
 bool wifiActive = false;
 Preferences calibrationPreferences;
-
-
 // ============================================================
 //                     WIFI TIMEOUT
 // ============================================================
-
 const unsigned long WIFI_NO_CLIENT_TIMEOUT = 60000UL;
-
 unsigned long wifiDisconnectTime = 0;
-
-
 // ============================================================
 //                     SENSOR STATES
 // ============================================================
-
 enum SensorID {
   SOIL_SENSOR,
   AHT_SENSOR,
   LIGHT_SENSOR
 };
-
 enum SensorState {
   SENSOR_RESTING,
   SENSOR_ACTIVE,
   SENSOR_NOT_FOUND,
   SENSOR_FAULT
 };
-
 extern SensorState soilState;
 extern SensorState ahtState;
 extern SensorState lightState;
-
-
 // ============================================================
 //                     SYSTEM MODES
 // ============================================================
-
 enum SystemMode {
   NORMAL_MODE,
   ALERT_MODE
 };
-
 enum StartupPhase {
   STARTUP_BOOT,
   STARTUP_SENSOR_CHECK,
   STARTUP_READY
 };
-
 SystemMode systemMode = NORMAL_MODE;
 StartupPhase startupPhase = STARTUP_BOOT;
-
 bool startupSensorCheckPassed = false;
 unsigned long startupCheckLastAttempt = 0;
 unsigned long startupWarningLastBeep = 0;
@@ -132,13 +100,10 @@ unsigned long startupSplashStart = 0;
 uint8_t startupSplashIndex = 0;
 const uint8_t STARTUP_SPLASH_COUNT = 3;
 const unsigned long STARTUP_SPLASH_TIME = 2000UL;
-
 const unsigned long STARTUP_SENSOR_CHECK_INTERVAL = 1000UL;
 const unsigned long STARTUP_WARNING_REPEAT_TIME = 1500UL;
 const unsigned long STARTUP_RESULT_DISPLAY_TIME = 2000UL;
 const unsigned long SENSOR_RECOVERY_INTERVAL = 1000UL;
-
-
 // ============================================================
 //                  NORMAL SENSOR CYCLING
 // ============================================================
@@ -156,34 +121,22 @@ const unsigned long SENSOR_RECOVERY_INTERVAL = 1000UL;
 //
 // Full cycle = 24 seconds
 // ============================================================
-
 const unsigned long SENSOR_ACTIVE_TIME = 3000UL;
 const unsigned long SENSOR_REST_TIME   = 5000UL;
-
 const unsigned long SENSOR_READ_INTERVAL = 1000UL;
-
 SensorID currentSensor = SOIL_SENSOR;
-
 unsigned long sensorCycleStart = 0;
 unsigned long lastSensorRead   = 0;
-
-
 // ============================================================
 //                       SENSOR DATA
 // ============================================================
-
 float soilPercent = NAN;
-
 float rawTemperature = NAN;
 float rawHumidity    = NAN;
 float rawLightLux    = NAN;
-
 float temperature = NAN;
 float humidity    = NAN;
-
 float lightLux = NAN;
-
-
 // ============================================================
 //                     SOIL CALIBRATION
 // ============================================================
@@ -201,12 +154,10 @@ float lightLux = NAN;
 //
 // Then replace these values.
 // ============================================================
-
 float soilDryRaw = 3000.0;
 float soilWetRaw = 1500.0;
 const float SOIL_PERCENT_SCALE = 1.0;
 const float SOIL_PERCENT_OFFSET = 0.0;
-
 // ============================================================
 //             OTHER SENSOR CALIBRATION SETTINGS
 // ============================================================
@@ -219,12 +170,9 @@ float tempScale = 1.0;
 float tempOffset = 0.0;
 float humidityScale = 1.0;
 float humidityOffset = 0.0;
-
 // BH1750 light correction.
 float lightScale = 1.0;
 float lightOffset = 0.0;
-
-
 // ============================================================
 //                       THRESHOLDS
 // ============================================================
@@ -239,62 +187,86 @@ float lightOffset = 0.0;
 // Soil < 30%  → ALERT
 // Soil > 35%  → clear alert
 // ============================================================
-
 // ---------------- SOIL ----------------
-
-const float SOIL_ALERT_LOW = 30.0;
-const float SOIL_CLEAR_LOW = 35.0;
-
-
+float SOIL_ALERT_LOW = 30.0;
+float SOIL_CLEAR_LOW = 35.0;
 // ---------------- TEMPERATURE ----------------
-
 float TEMP_ALERT_HIGH = 32.0;
 float TEMP_ALERT_LOW = 18.0;
-const float TEMP_CLEAR_HIGH = 30.0;
-const float TEMP_CLEAR_LOW = 20.0;
-
-
+float TEMP_CLEAR_HIGH = 30.0;
+float TEMP_CLEAR_LOW = 20.0;
 // ---------------- HUMIDITY ----------------
-
 float HUM_ALERT_LOW  = 35.0;
 float HUM_ALERT_HIGH = 85.0;
-const float HUM_CLEAR_LOW  = 40.0;
-const float HUM_CLEAR_HIGH = 80.0;
-
-
+float HUM_CLEAR_LOW  = 40.0;
+float HUM_CLEAR_HIGH = 80.0;
 // ---------------- LIGHT ----------------
-
 float LIGHT_ALERT_LOW = 100.0;
 float LIGHT_ALERT_HIGH = 2000.0;
-const float LIGHT_CLEAR_LOW = 150.0;
-const float LIGHT_CLEAR_HIGH = 1800.0;
-
-
+float LIGHT_CLEAR_LOW = 150.0;
+float LIGHT_CLEAR_HIGH = 1800.0;
+// ============================================================
+//                        BLE APP PROTOCOL
+// ============================================================
+//
+// The ESP32 remains a BLE peripheral while Wi-Fi is off.  The
+// Android app can subscribe to the telemetry and alert
+// characteristics, and write one short "key=value" setting at a
+// time to the configuration characteristic.
+//
+// Telemetry and alert notifications are always 20 bytes, so they
+// work even before the phone negotiates a larger BLE MTU:
+//
+//   byte 0     protocol version (1)
+//   byte 1     flags: bit 0 ALERT, bit 1 Wi-Fi, bits 2-3 soil
+//              state, bits 4-5 AHT state, bits 6-7 light state
+//   byte 2-3   reserved (0)
+//   byte 4-7   soil moisture percent (float, little-endian)
+//   byte 8-11  temperature in C (float, little-endian)
+//   byte 12-15 humidity percent (float, little-endian)
+//   byte 16-19 light in lux (float, little-endian)
+//
+// The Android app must create the visible Android notification when
+// it receives a notification on BLE_ALERT_UUID. A BLE peripheral is
+// not permitted to create an Android system notification by itself.
+// ============================================================
+const char* BLE_DEVICE_NAME = "Smart Plant Monitor";
+const char* BLE_SERVICE_UUID = "7d8d2f10-2d7f-4d82-8dd7-5a5c6e001000";
+const char* BLE_TELEMETRY_UUID = "7d8d2f10-2d7f-4d82-8dd7-5a5c6e001001";
+const char* BLE_CONFIG_UUID = "7d8d2f10-2d7f-4d82-8dd7-5a5c6e001002";
+const char* BLE_ALERT_UUID = "7d8d2f10-2d7f-4d82-8dd7-5a5c6e001003";
+BLEServer* bleServer = nullptr;
+BLECharacteristic* bleTelemetryCharacteristic = nullptr;
+BLECharacteristic* bleConfigCharacteristic = nullptr;
+BLECharacteristic* bleAlertCharacteristic = nullptr;
+bool bleClientConnected = false;
+bool bleAlertPending = false;
+unsigned long lastBLENotification = 0;
+const unsigned long BLE_NOTIFY_INTERVAL = 2000UL;
+void updateAlertClearLimits();
+void printCalibrationAndAlertSettings();
+void updateBLEConfigurationValue(const String& value);
+bool applyBLEConfiguration(const String& command, String& response);
+void bleTask();
 // ============================================================
 //                        OLED SLIDESHOW
 // ============================================================
-
 const unsigned long OLED_SLIDE_TIME = 4000UL;
 const unsigned long OLED_FRAME_TIME = 40UL;
 const unsigned long OLED_TRANSITION_TIME = 500UL;
 const unsigned long OLED_STATUS_REFRESH_TIME = 250UL;
 const unsigned long OLED_APP_REFRESH_TIME = 500UL;
-
 unsigned long oledLastChange = 0;
 unsigned long oledLastFrame = 0;
 unsigned long oledTransitionStart = 0;
 unsigned long oledLastStatusRefresh = 0;
 unsigned long oledLastAppRefresh = 0;
-
 int oledPage = 0;
-
 const int OLED_PAGE_COUNT = 7;
-
 bool oledTransitionActive = false;
 bool oledTransitionFromLeft = false;
 bool oledWasShowingStatusScreen = false;
 bool oledAppMenuOpen = false;
-
 const char* OLED_APP_NAMES[OLED_PAGE_COUNT] = {
   "SlideShow",
   "Soil Moisture",
@@ -304,22 +276,17 @@ const char* OLED_APP_NAMES[OLED_PAGE_COUNT] = {
   "Wi-Fi Status",
   "Calibrate"
 };
-
 const uint8_t SLIDESHOW_CONTRAST = 45;
 bool slideshowRunning = true;
-
-
 // ============================================================
 //                    SENSOR CALIBRATION APP
 // ============================================================
 const unsigned long CALIBRATION_SAMPLE_INTERVAL = 1000UL;
-
 enum CalibrationState {
   CAL_IDLE,
   CAL_SAMPLING,
   CAL_EDITING
 };
-
 CalibrationState calibrationState = CAL_IDLE;
 uint8_t calibrationTarget = 0; // 0..3: soil, temperature, humidity, light
 bool calibrationTargetMax = false;
@@ -327,100 +294,69 @@ float calibrationSamples[3] = {0, 0, 0};
 uint8_t calibrationSampleCount = 0;
 float calibrationAverage = NAN;
 unsigned long calibrationLastSample = 0;
-
 uint8_t oledOutgoingFrame[
   SCREEN_WIDTH * SCREEN_HEIGHT / 8
 ];
-
-
 // ============================================================
 //                          BUZZER
 // ============================================================
-
 bool buzzerActive = false;
-
 unsigned long buzzerStart = 0;
 unsigned long buzzerDuration = 0;
-
 const unsigned long BUZZER_BEEP_TIME = 150UL;
-
-
 // ============================================================
 //                          BUTTON
 // ============================================================
-
 unsigned long lastButtonChange = 0;
 unsigned long oledButtonChange[4] = {0, 0, 0, 0};
-
 const unsigned long DEBOUNCE_TIME = 50UL;
 const unsigned long OLED_MANUAL_OVERRIDE_TIME = 600000UL;
-
 const uint8_t OLED_MIN_CONTRAST = 20;
 const uint8_t OLED_MAX_CONTRAST = 255;
 const float OLED_BRIGHTNESS_REFERENCE_LUX = 65535.0;
-
 uint8_t oledContrast = 128;
 unsigned long oledManualOverrideStart = 0;
 bool oledManualOverrideActive = false;
-
 void setOLEDContrast();
 void updateAutomaticOLEDContrast();
-
-
 // ============================================================
 //                     UTILITY FUNCTIONS
 // ============================================================
-
 String sensorStateToString(SensorState state) {
-
   switch (state) {
-
     case SENSOR_ACTIVE:
       return "ACTIVE";
-
     case SENSOR_RESTING:
       return "RESTING";
-
     case SENSOR_NOT_FOUND:
       return "NOT FOUND";
-
     case SENSOR_FAULT:
       return "FAULT";
   }
-
   return "UNKNOWN";
 }
-
-
 // ============================================================
 //                         RGB LED
 // ============================================================
-
 void setRGB(
   bool red,
   bool green,
   bool blue
 ) {
-
   digitalWrite(
     RGB_R_PIN,
     red ? LOW : HIGH
   );
-
   digitalWrite(
     RGB_G_PIN,
     green ? LOW : HIGH
   );
-
   digitalWrite(
     RGB_B_PIN,
     blue ? LOW : HIGH
   );
 }
-
-
 bool hasSensorProblem() {
-
   return
     soilState == SENSOR_NOT_FOUND ||
     soilState == SENSOR_FAULT ||
@@ -431,137 +367,93 @@ bool hasSensorProblem() {
     lightState == SENSOR_NOT_FOUND ||
     lightState == SENSOR_FAULT;
 }
-
-
 bool allSensorsHealthy() {
-
   bool soilOk =
     soilState != SENSOR_NOT_FOUND &&
     soilState != SENSOR_FAULT &&
     !isnan(soilPercent);
-
   bool ahtOk =
     ahtDetected &&
     ahtState != SENSOR_NOT_FOUND &&
     ahtState != SENSOR_FAULT &&
     !isnan(temperature) &&
     !isnan(humidity);
-
   bool lightOk =
     bhDetected &&
     lightState != SENSOR_NOT_FOUND &&
     lightState != SENSOR_FAULT &&
     !isnan(lightLux);
-
   return soilOk && ahtOk && lightOk;
 }
-
-
 void updateRGB() {
-
   // Startup validation has priority before normal operation
   if (startupPhase == STARTUP_SENSOR_CHECK) {
-
     if (startupSensorCheckPassed) {
       setRGB(false, true, false);
     } else {
       setRGB(false, false, true);
     }
-
     return;
   }
-
-
   // A connection problem takes priority over threshold alerts.
   if (hasSensorProblem()) {
     setRGB(false, false, true);
     return;
   }
-
-
   // ALERT always takes priority: red means something is wrong
   if (systemMode == ALERT_MODE) {
-
     setRGB(true, false, false);
-
     return;
   }
-
-
   // GREEN only when every required sensor is connected
   // and each one is returning a valid reading.
   if (allSensorsHealthy()) {
-
     setRGB(false, true, false);
-
     return;
   }
-
-
   // Blue means a sensor needs attention. Red remains reserved for plant alerts.
   setRGB(false, false, true);
 }
-
-
 void startupSensorCheckTask() {
-
   if (startupPhase != STARTUP_SENSOR_CHECK)
     return;
-
-
   if (
     millis() - startupCheckLastAttempt <
     STARTUP_SENSOR_CHECK_INTERVAL
   ) {
     return;
   }
-
   startupCheckLastAttempt = millis();
-
   // Retry I2C initialisation too, so a sensor plugged in during boot is found.
   sensorRecoveryLastAttempt = millis() - SENSOR_RECOVERY_INTERVAL;
   sensorRecoveryTask();
-
   readSoil();
   readAHT();
   readBH1750();
-
   bool soilOk =
     soilState == SENSOR_ACTIVE &&
     !isnan(soilPercent);
-
   bool ahtOk =
     ahtDetected &&
     ahtState == SENSOR_ACTIVE &&
     !isnan(temperature) &&
     !isnan(humidity);
-
   bool lightOk =
     bhDetected &&
     lightState == SENSOR_ACTIVE &&
     !isnan(lightLux);
-
   startupSensorCheckPassed =
     soilOk && ahtOk && lightOk;
-
   if (startupSensorCheckPassed) {
-
     startupResultDisplayUntil = millis() + STARTUP_RESULT_DISPLAY_TIME;
-
     startupPhase = STARTUP_READY;
-
     startupHappyBeep();
-
     Serial.println();
     Serial.println("All sensors OK. Starting normal monitoring.");
-
     return;
   }
-
-
   Serial.println();
   Serial.println("Sensor check failed. Check sensor connection.");
-
   if (
     millis() - startupWarningLastBeep >=
     STARTUP_WARNING_REPEAT_TIME
@@ -570,75 +462,49 @@ void startupSensorCheckTask() {
     startBeep();
   }
 }
-
-
 // ============================================================
 //                          BUZZER
 // ============================================================
-
 void startTone(int frequency, unsigned long duration) {
-
   tone(BUZZER_PIN, frequency);
-
   buzzerActive = true;
   buzzerStart = millis();
   buzzerDuration = duration;
 }
-
-
 void startBeep() {
   startTone(2000, BUZZER_BEEP_TIME);
 }
-
-
 void startButtonClick() {
   // A short, soft confirmation for every physical button press.
   startTone(1200, 35UL);
 }
-
-
 void updateBuzzer() {
-
   if (!buzzerActive)
     return;
-
-
   if (
     millis() - buzzerStart >=
     buzzerDuration
   ) {
-
     noTone(BUZZER_PIN);
-
     buzzerActive = false;
   }
 }
-
-
 // ============================================================
 //                      STARTUP BEEP
 // ============================================================
-
 void startupBeep() {
-
   tone(
     BUZZER_PIN,
     1000
   );
-
   delay(80);
-
   noTone(
     BUZZER_PIN
   );
 }
-
-
 // A short rising three-note confirmation for a successful sensor check.
 void startupHappyBeep() {
-
   const int notes[] = { 1600, 2100, 2800 };
-
   for (int index = 0; index < 3; index++) {
     tone(BUZZER_PIN, notes[index]);
     delay(90);
@@ -646,23 +512,18 @@ void startupHappyBeep() {
     delay(45);
   }
 }
-
 void showCenteredText(const char* text, int y) {
   int16_t x1, y1;
   uint16_t w, h;
-
   display.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
   int16_t x = (SCREEN_WIDTH - w) / 2;
-
   display.setCursor(x, y);
   display.println(text);
 }
-
 void showStartupSplashScreen() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
-
   if (startupSplashIndex == 0) {
     showCenteredText("SMART PLANT", 10);
     showCenteredText("MONITORING", 24);
@@ -674,26 +535,22 @@ void showStartupSplashScreen() {
   } else if (startupSplashIndex == 2) {
     showCenteredText("DESIGN BY", 10);
     showCenteredText("TAMAGHNA BASU", 28);
+    startupBeep();
   }
-
   display.display();
 }
-
 void startupSplashTask() {
   if (startupPhase != STARTUP_BOOT) {
     return;
   }
-
   if (startupSplashStart == 0) {
     startupSplashStart = millis();
     showStartupSplashScreen();
     return;
   }
-
   if (millis() - startupSplashStart >= STARTUP_SPLASH_TIME) {
     startupSplashIndex++;
     startupSplashStart = millis();
-
     if (startupSplashIndex >= STARTUP_SPLASH_COUNT) {
       startupSplashIndex = 0;
       startupSplashStart = 0;
@@ -703,112 +560,74 @@ void startupSplashTask() {
       startupWarningLastBeep = 0;
       return;
     }
-
     showStartupSplashScreen();
   }
 }
-
-
 // ============================================================
 //                       SOIL SENSOR
 // ============================================================
-
 SensorState soilState = SENSOR_RESTING;
-
-
 // ------------------------------------------------------------
 // Read soil sensor
 // ------------------------------------------------------------
-
 void readSoil() {
-
   int raw = analogRead(
     SOIL_PIN
   );
-
-
   Serial.print(
     "Soil RAW: "
   );
-
   Serial.println(raw);
-
-
   // ----------------------------------------------------------
   // Basic invalid-reading detection
   // ----------------------------------------------------------
-
   if (
     raw < 20 ||
     raw > 4080
   ) {
-
     soilState = SENSOR_FAULT;
-
     soilPercent = NAN;
-
     return;
   }
-
-
   // ----------------------------------------------------------
   // Valid reading
   // ----------------------------------------------------------
-
   soilState = SENSOR_ACTIVE;
-
-
   soilPercent =
     (raw - soilDryRaw) * 100.0 /
     (soilWetRaw - soilDryRaw);
-
-
   soilPercent = constrain(
     soilPercent * SOIL_PERCENT_SCALE + SOIL_PERCENT_OFFSET,
     0,
     100
   );
-
-
   Serial.print(
     "Soil Moisture: "
   );
-
   Serial.print(
     soilPercent,
     1
   );
-
   Serial.println("%");
 }
-
-
 void saveCalibrationValue(const char* key, float value) {
   calibrationPreferences.putFloat(key, value);
 }
-
-
 float calibrationLiveValue() {
   if (calibrationTarget == 0) return analogRead(SOIL_PIN);
   if (calibrationTarget == 1) return rawTemperature;
   if (calibrationTarget == 2) return rawHumidity;
   return rawLightLux;
 }
-
-
 float calibrationStep(float value) {
   return fabs(value - roundf(value)) > 0.01 ? 0.1 : 1.0;
 }
-
-
 const char* calibrationSensorName() {
   if (calibrationTarget == 0) return "SOIL";
   if (calibrationTarget == 1) return "TEMP";
   if (calibrationTarget == 2) return "HUMIDITY";
   return "LIGHT";
 }
-
-
 void calibrationBegin() {
   calibrationState = CAL_SAMPLING;
   calibrationSampleCount = 0;
@@ -816,11 +635,8 @@ void calibrationBegin() {
   calibrationLastSample = 0;
   startTone(1700, 80);
 }
-
-
 void calibrationSave() {
   float value = calibrationAverage;
-
   if (calibrationTarget == 0) {
     if (calibrationTargetMax) {
       soilWetRaw = value;
@@ -832,49 +648,44 @@ void calibrationSave() {
   } else if (calibrationTarget == 1) {
     if (calibrationTargetMax) {
       TEMP_ALERT_HIGH = value;
-      saveCalibrationValue("tempMaxThreshold", value);
+      saveCalibrationValue("tempHigh", value);
     } else {
       TEMP_ALERT_LOW = value;
-      saveCalibrationValue("tempMinThreshold", value);
+      saveCalibrationValue("tempLow", value);
     }
   } else if (calibrationTarget == 2) {
     if (calibrationTargetMax) {
       HUM_ALERT_HIGH = value;
-      saveCalibrationValue("humidityMaxThreshold", value);
+      saveCalibrationValue("humHigh", value);
     } else {
       HUM_ALERT_LOW = value;
-      saveCalibrationValue("humidityMinThreshold", value);
+      saveCalibrationValue("humLow", value);
     }
   } else {
     if (calibrationTargetMax) {
       LIGHT_ALERT_HIGH = value;
-      saveCalibrationValue("lightMaxThreshold", value);
+      saveCalibrationValue("lightHigh", value);
     } else {
       LIGHT_ALERT_LOW = value;
-      saveCalibrationValue("lightMinThreshold", value);
+      saveCalibrationValue("lightLow", value);
     }
   }
-
+  updateAlertClearLimits();
   calibrationState = CAL_IDLE;
   startTone(2600, 120);
 }
-
-
 void calibrationTask() {
   if (calibrationState != CAL_SAMPLING) return;
   if (calibrationLastSample != 0 &&
       millis() - calibrationLastSample < CALIBRATION_SAMPLE_INTERVAL) return;
-
   float reading = calibrationLiveValue();
   if (isnan(reading)) {
     startTone(450, 100);
     return;
   }
-
   calibrationLastSample = millis();
   calibrationSamples[calibrationSampleCount++] = reading;
   startTone(1300, 35);
-
   if (calibrationSampleCount >= 3) {
     calibrationAverage =
       (calibrationSamples[0] + calibrationSamples[1] + calibrationSamples[2]) / 3.0;
@@ -882,19 +693,14 @@ void calibrationTask() {
     startTone(2400, 120);
   }
 }
-
-
 void calibrationAdjust(int direction) {
   if (calibrationState != CAL_EDITING || isnan(calibrationAverage)) return;
   calibrationAverage += direction * calibrationStep(calibrationAverage);
-
   if (calibrationTarget == 0) calibrationAverage = constrain(calibrationAverage, 20.0, 4080.0);
   else if (calibrationTarget == 1) calibrationAverage = constrain(calibrationAverage, -40.0, 85.0);
   else if (calibrationTarget == 2) calibrationAverage = constrain(calibrationAverage, 0.0, 100.0);
   else calibrationAverage = max(0.0f, calibrationAverage);
 }
-
-
 void calibrationSelectTarget(int direction) {
   int index = calibrationTarget * 2 + (calibrationTargetMax ? 1 : 0);
   index = (index + direction + 8) % 8;
@@ -902,170 +708,392 @@ void calibrationSelectTarget(int direction) {
   calibrationTargetMax = (index % 2) == 1;
   startTone(1050, 30);
 }
-
-
+// ============================================================
+//                        BLE SUPPORT
+// ============================================================
+uint8_t sensorStateToBLE(SensorState state) {
+  switch (state) {
+    case SENSOR_RESTING: return 0;
+    case SENSOR_ACTIVE: return 1;
+    case SENSOR_NOT_FOUND: return 2;
+    case SENSOR_FAULT: return 3;
+  }
+  return 3;
+}
+String bleFloat(float value, uint8_t decimals = 1) {
+  if (isnan(value)) return "nan";
+  return String(value, static_cast<unsigned int>(decimals));
+}
+void updateAlertClearLimits() {
+  // Keep a small hysteresis band when app-configured alert limits
+  // change, preventing rapid transitions between normal and alert.
+  float tempMiddle = (TEMP_ALERT_LOW + TEMP_ALERT_HIGH) / 2.0;
+  float humidityMiddle = (HUM_ALERT_LOW + HUM_ALERT_HIGH) / 2.0;
+  float lightMiddle = (LIGHT_ALERT_LOW + LIGHT_ALERT_HIGH) / 2.0;
+  float lightGap = max(10.0f, min(200.0f, LIGHT_ALERT_HIGH * 0.10f));
+  // Recovery hysteresis: keep the alert stable, but clear it close to
+  // the user-configured limits. Light keeps its existing wider band below.
+  SOIL_CLEAR_LOW = min(100.0f, SOIL_ALERT_LOW + 2.0f);
+  TEMP_CLEAR_LOW = min(tempMiddle, TEMP_ALERT_LOW + 0.5f);
+  TEMP_CLEAR_HIGH = max(tempMiddle, TEMP_ALERT_HIGH - 0.5f);
+  HUM_CLEAR_LOW = min(humidityMiddle, HUM_ALERT_LOW + 2.0f);
+  HUM_CLEAR_HIGH = max(humidityMiddle, HUM_ALERT_HIGH - 2.0f);
+  LIGHT_CLEAR_LOW = min(lightMiddle, LIGHT_ALERT_LOW + lightGap);
+  LIGHT_CLEAR_HIGH = max(lightMiddle, LIGHT_ALERT_HIGH - lightGap);
+}
+void printCalibrationAndAlertSettings() {
+  Serial.println("Stored calibration and alert settings:");
+  Serial.print("  Soil raw (dry/wet): ");
+  Serial.print(soilDryRaw, 1);
+  Serial.print(" / ");
+  Serial.println(soilWetRaw, 1);
+  Serial.print("  Temperature scale/offset: ");
+  Serial.print(tempScale, 3);
+  Serial.print(" / ");
+  Serial.println(tempOffset, 2);
+  Serial.print("  Humidity scale/offset: ");
+  Serial.print(humidityScale, 3);
+  Serial.print(" / ");
+  Serial.println(humidityOffset, 2);
+  Serial.print("  Light scale/offset: ");
+  Serial.print(lightScale, 3);
+  Serial.print(" / ");
+  Serial.println(lightOffset, 2);
+  Serial.print("  Alert limits soil/temp/humidity/light: ");
+  Serial.print(SOIL_ALERT_LOW, 1);
+  Serial.print(" / ");
+  Serial.print(TEMP_ALERT_LOW, 1);
+  Serial.print("-");
+  Serial.print(TEMP_ALERT_HIGH, 1);
+  Serial.print(" / ");
+  Serial.print(HUM_ALERT_LOW, 1);
+  Serial.print("-");
+  Serial.print(HUM_ALERT_HIGH, 1);
+  Serial.print(" / ");
+  Serial.print(LIGHT_ALERT_LOW, 1);
+  Serial.print("-");
+  Serial.println(LIGHT_ALERT_HIGH, 1);
+}
+bool bleConfigValueForKey(const String& key, String& response) {
+  if (key == "soildry") response = "soilDry=" + bleFloat(soilDryRaw);
+  else if (key == "soilwet") response = "soilWet=" + bleFloat(soilWetRaw);
+  else if (key == "tempscale") response = "tempScale=" + bleFloat(tempScale, 2);
+  else if (key == "tempoffset") response = "tempOffset=" + bleFloat(tempOffset, 1);
+  else if (key == "humscale") response = "humScale=" + bleFloat(humidityScale, 2);
+  else if (key == "humoffset") response = "humOffset=" + bleFloat(humidityOffset, 1);
+  else if (key == "lightscale") response = "lightScale=" + bleFloat(lightScale, 2);
+  else if (key == "lightoffset") response = "lightOffset=" + bleFloat(lightOffset, 1);
+  else if (key == "soillow") response = "soilLow=" + bleFloat(SOIL_ALERT_LOW);
+  else if (key == "templow") response = "tempLow=" + bleFloat(TEMP_ALERT_LOW);
+  else if (key == "temphigh") response = "tempHigh=" + bleFloat(TEMP_ALERT_HIGH);
+  else if (key == "humlow") response = "humLow=" + bleFloat(HUM_ALERT_LOW);
+  else if (key == "humhigh") response = "humHigh=" + bleFloat(HUM_ALERT_HIGH);
+  else if (key == "lightlow") response = "lightLow=" + bleFloat(LIGHT_ALERT_LOW);
+  else if (key == "lighthigh") response = "lightHigh=" + bleFloat(LIGHT_ALERT_HIGH);
+  else return false;
+  return true;
+}
+bool setBLEConfigValue(const String& key, float value, String& response) {
+  if (isnan(value) || isinf(value)) {
+    response = "ERR:bad-number";
+    return false;
+  }
+  if (key == "soildry") {
+    if (value < 20.0 || value > 4080.0 || fabsf(value - soilWetRaw) < 10.0) {
+      response = "ERR:soilDry";
+      return false;
+    }
+    soilDryRaw = value;
+    saveCalibrationValue("soilDry", value);
+  } else if (key == "soilwet") {
+    if (value < 20.0 || value > 4080.0 || fabsf(value - soilDryRaw) < 10.0) {
+      response = "ERR:soilWet";
+      return false;
+    }
+    soilWetRaw = value;
+    saveCalibrationValue("soilWet", value);
+  } else if (key == "tempscale") {
+    if (value < 0.1 || value > 10.0) { response = "ERR:tempScale"; return false; }
+    tempScale = value;
+    saveCalibrationValue("tempScale", value);
+  } else if (key == "tempoffset") {
+    if (value < -50.0 || value > 50.0) { response = "ERR:tempOffset"; return false; }
+    tempOffset = value;
+    saveCalibrationValue("tempOffset", value);
+  } else if (key == "humscale") {
+    if (value < 0.1 || value > 10.0) { response = "ERR:humScale"; return false; }
+    humidityScale = value;
+    saveCalibrationValue("humidityScale", value);
+  } else if (key == "humoffset") {
+    if (value < -100.0 || value > 100.0) { response = "ERR:humOffset"; return false; }
+    humidityOffset = value;
+    saveCalibrationValue("humidityOffset", value);
+  } else if (key == "lightscale") {
+    if (value < 0.1 || value > 10.0) { response = "ERR:lightScale"; return false; }
+    lightScale = value;
+    saveCalibrationValue("lightScale", value);
+  } else if (key == "lightoffset") {
+    if (value < -1000.0 || value > 100000.0) { response = "ERR:lightOffset"; return false; }
+    lightOffset = value;
+    saveCalibrationValue("lightOffset", value);
+  } else if (key == "soillow") {
+    if (value < 0.0 || value > 100.0) { response = "ERR:soilLow"; return false; }
+    SOIL_ALERT_LOW = value;
+    // ESP32 Preferences/NVS keys are limited to 15 characters.
+    saveCalibrationValue("soilLow", value);
+  } else if (key == "templow") {
+    if (value < -40.0 || value >= TEMP_ALERT_HIGH) { response = "ERR:tempLow"; return false; }
+    TEMP_ALERT_LOW = value;
+    saveCalibrationValue("tempLow", value);
+  } else if (key == "temphigh") {
+    if (value > 85.0 || value <= TEMP_ALERT_LOW) { response = "ERR:tempHigh"; return false; }
+    TEMP_ALERT_HIGH = value;
+    saveCalibrationValue("tempHigh", value);
+  } else if (key == "humlow") {
+    if (value < 0.0 || value >= HUM_ALERT_HIGH) { response = "ERR:humLow"; return false; }
+    HUM_ALERT_LOW = value;
+    saveCalibrationValue("humLow", value);
+  } else if (key == "humhigh") {
+    if (value > 100.0 || value <= HUM_ALERT_LOW) { response = "ERR:humHigh"; return false; }
+    HUM_ALERT_HIGH = value;
+    saveCalibrationValue("humHigh", value);
+  } else if (key == "lightlow") {
+    if (value < 0.0 || value >= LIGHT_ALERT_HIGH) { response = "ERR:lightLow"; return false; }
+    LIGHT_ALERT_LOW = value;
+    saveCalibrationValue("lightLow", value);
+  } else if (key == "lighthigh") {
+    if (value > 100000.0 || value <= LIGHT_ALERT_LOW) { response = "ERR:lightHigh"; return false; }
+    LIGHT_ALERT_HIGH = value;
+    saveCalibrationValue("lightHigh", value);
+  } else {
+    response = "ERR:unknown-key";
+    return false;
+  }
+  updateAlertClearLimits();
+  String currentValue;
+  bleConfigValueForKey(key, currentValue);
+  response = "OK:" + currentValue;
+  return true;
+}
+bool applyBLEConfiguration(const String& command, String& response) {
+  int separator = command.indexOf('=');
+  if (separator <= 0 || separator == command.length() - 1) {
+    response = "ERR:use-key=value";
+    return false;
+  }
+  String key = command.substring(0, separator);
+  String valueText = command.substring(separator + 1);
+  key.trim();
+  valueText.trim();
+  key.toLowerCase();
+  if (key == "get") {
+    valueText.toLowerCase();
+    if (!bleConfigValueForKey(valueText, response)) {
+      response = "ERR:read-key";
+      return false;
+    }
+    return true;
+  }
+  return setBLEConfigValue(key, valueText.toFloat(), response);
+}
+void updateBLEConfigurationValue(const String& value) {
+  if (bleConfigCharacteristic == nullptr) return;
+  bleConfigCharacteristic->setValue(value.c_str());
+  if (bleClientConnected) bleConfigCharacteristic->notify();
+}
+void buildBLESensorPacket(uint8_t packet[20]) {
+  packet[0] = 1;
+  packet[1] =
+    (systemMode == ALERT_MODE ? 0x01 : 0x00) |
+    (wifiActive ? 0x02 : 0x00) |
+    (sensorStateToBLE(soilState) << 2) |
+    (sensorStateToBLE(ahtState) << 4) |
+    (sensorStateToBLE(lightState) << 6);
+  packet[2] = 0;
+  packet[3] = 0;
+  memcpy(packet + 4, &soilPercent, sizeof(float));
+  memcpy(packet + 8, &temperature, sizeof(float));
+  memcpy(packet + 12, &humidity, sizeof(float));
+  memcpy(packet + 16, &lightLux, sizeof(float));
+}
+void publishBLESensorData() {
+  if (!bleClientConnected || bleTelemetryCharacteristic == nullptr) return;
+  uint8_t packet[20];
+  buildBLESensorPacket(packet);
+  bleTelemetryCharacteristic->setValue(packet, sizeof(packet));
+  bleTelemetryCharacteristic->notify();
+}
+void sendBLEAlertNotification() {
+  if (!bleClientConnected || bleAlertCharacteristic == nullptr) {
+    bleAlertPending = true;
+    return;
+  }
+  uint8_t packet[20];
+  buildBLESensorPacket(packet);
+  bleAlertCharacteristic->setValue(packet, sizeof(packet));
+  bleAlertCharacteristic->notify();
+  bleAlertPending = false;
+  Serial.println("BLE alert notification sent to connected app.");
+}
+class PlantBLEServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* server) override {
+    bleClientConnected = true;
+    if (systemMode == ALERT_MODE) bleAlertPending = true;
+    Serial.println("BLE phone connected.");
+  }
+  void onDisconnect(BLEServer* server) override {
+    bleClientConnected = false;
+    BLEDevice::startAdvertising();
+    Serial.println("BLE phone disconnected; advertising restarted.");
+  }
+};
+class PlantBLEConfigCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* characteristic) override {
+    String command = String(characteristic->getValue().c_str());
+    String response;
+    applyBLEConfiguration(command, response);
+    updateBLEConfigurationValue(response);
+    Serial.print("BLE config: ");
+    Serial.println(response);
+  }
+};
+void initBLE() {
+  BLEDevice::init(BLE_DEVICE_NAME);
+  BLEDevice::setMTU(247);
+  bleServer = BLEDevice::createServer();
+  bleServer->setCallbacks(new PlantBLEServerCallbacks());
+  BLEService* bleService = bleServer->createService(BLE_SERVICE_UUID);
+  bleTelemetryCharacteristic = bleService->createCharacteristic(
+    BLE_TELEMETRY_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+  bleTelemetryCharacteristic->addDescriptor(new BLE2902());
+  bleConfigCharacteristic = bleService->createCharacteristic(
+    BLE_CONFIG_UUID,
+    BLECharacteristic::PROPERTY_READ |
+      BLECharacteristic::PROPERTY_WRITE |
+      BLECharacteristic::PROPERTY_NOTIFY
+  );
+  bleConfigCharacteristic->addDescriptor(new BLE2902());
+  bleConfigCharacteristic->setCallbacks(new PlantBLEConfigCallbacks());
+  updateBLEConfigurationValue("READY:key=value");
+  bleAlertCharacteristic = bleService->createCharacteristic(
+    BLE_ALERT_UUID,
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  bleAlertCharacteristic->addDescriptor(new BLE2902());
+  bleService->start();
+  BLEDevice::startAdvertising();
+  Serial.println("BLE ready: Smart Plant Monitor is advertising.");
+}
+void bleTask() {
+  if (bleClientConnected && millis() - lastBLENotification >= BLE_NOTIFY_INTERVAL) {
+    lastBLENotification = millis();
+    publishBLESensorData();
+  }
+  if (bleAlertPending) sendBLEAlertNotification();
+}
 // ============================================================
 //                        AHT21B SENSOR
 // ============================================================
-
 SensorState ahtState = SENSOR_NOT_FOUND;
-
-
 bool i2cDevicePresent(uint8_t address) {
-
   Wire.beginTransmission(address);
   return Wire.endTransmission() == 0;
 }
-
-
 // ------------------------------------------------------------
 // Read AHT21B
 // ------------------------------------------------------------
-
 void readAHT() {
-
   if (!ahtDetected || !i2cDevicePresent(0x38)) {
-
     ahtState = SENSOR_NOT_FOUND;
     ahtDetected = false;
     temperature = NAN;
     humidity = NAN;
-
     return;
   }
-
-
   sensors_event_t humidityEvent;
   sensors_event_t temperatureEvent;
-
-
   aht.getEvent(
     &humidityEvent,
     &temperatureEvent
   );
-
-
   rawTemperature =
     temperatureEvent.temperature;
-
   rawHumidity =
     humidityEvent.relative_humidity;
-
   temperature = rawTemperature * tempScale + tempOffset;
   humidity = rawHumidity * humidityScale + humidityOffset;
-
-
   if (
     isnan(temperature) ||
     isnan(humidity)
   ) {
-
     ahtState = SENSOR_FAULT;
     ahtDetected = false;
     temperature = NAN;
     humidity = NAN;
-
     return;
   }
-
-
   ahtState = SENSOR_ACTIVE;
-
-
   Serial.print(
     "Temperature: "
   );
-
   Serial.print(
     temperature,
     1
   );
-
   Serial.println(" C");
-
-
   Serial.print(
     "Humidity: "
   );
-
   Serial.print(
     humidity,
     1
   );
-
   Serial.println(" %");
 }
-
-
 // ============================================================
 //                       BH1750 SENSOR
 // ============================================================
-
 SensorState lightState = SENSOR_NOT_FOUND;
-
-
 // ------------------------------------------------------------
 // Read BH1750
 // ------------------------------------------------------------
-
 void readBH1750() {
-
   if (!bhDetected || !i2cDevicePresent(0x23)) {
-
     lightState = SENSOR_NOT_FOUND;
     bhDetected = false;
     lightLux = NAN;
-
     return;
   }
-
-
   float lux =
     bh1750.readLightLevel();
-
-
   if (lux < 0) {
-
     lightState = SENSOR_FAULT;
     bhDetected = false;
-
     lightLux = NAN;
-
     return;
   }
-
-
   rawLightLux = lux;
   lightLux = rawLightLux * lightScale + lightOffset;
-
   lightState = SENSOR_ACTIVE;
-
   updateAutomaticOLEDContrast();
-
-
   Serial.print(
     "Light: "
   );
-
   Serial.print(
     lightLux,
     1
   );
-
   Serial.println(" lux");
 }
-
-
 // Re-initialise a disconnected I2C sensor and re-test a bad soil reading.
 // This lets the monitor automatically return to normal as soon as it is fixed.
 void sensorRecoveryTask() {
-
   if (millis() - sensorRecoveryLastAttempt < SENSOR_RECOVERY_INTERVAL) {
     return;
   }
-
   sensorRecoveryLastAttempt = millis();
-
   if (!ahtDetected || ahtState == SENSOR_NOT_FOUND || ahtState == SENSOR_FAULT) {
     if (aht.begin(&Wire)) {
       ahtDetected = true;
@@ -1077,7 +1105,6 @@ void sensorRecoveryTask() {
       humidity = NAN;
     }
   }
-
   if (!bhDetected || lightState == SENSOR_NOT_FOUND || lightState == SENSOR_FAULT) {
     if (bh1750.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
       bhDetected = true;
@@ -1088,268 +1115,163 @@ void sensorRecoveryTask() {
       lightLux = NAN;
     }
   }
-
   if (soilState == SENSOR_NOT_FOUND || soilState == SENSOR_FAULT) {
     readSoil();
   }
 }
-
-
 // ============================================================
 //                   SENSOR CYCLE MANAGEMENT
 // ============================================================
-
 void startSensor(SensorID sensor) {
-
   currentSensor = sensor;
-
   sensorCycleStart = millis();
-
   lastSensorRead = 0;
-
-
   if (sensor == SOIL_SENSOR) {
-
     if (soilState != SENSOR_FAULT)
       soilState = SENSOR_ACTIVE;
   }
-
-
   else if (sensor == AHT_SENSOR) {
-
     if (ahtDetected)
       ahtState = SENSOR_ACTIVE;
     else
       ahtState = SENSOR_NOT_FOUND;
   }
-
-
   else if (sensor == LIGHT_SENSOR) {
-
     if (bhDetected)
       lightState = SENSOR_ACTIVE;
     else
       lightState = SENSOR_NOT_FOUND;
   }
 }
-
-
 // ------------------------------------------------------------
 // Move current sensor into RESTING state
 // ------------------------------------------------------------
-
 void setCurrentSensorResting() {
-
   if (currentSensor == SOIL_SENSOR) {
-
     if (soilState == SENSOR_ACTIVE)
       soilState = SENSOR_RESTING;
   }
-
-
   else if (currentSensor == AHT_SENSOR) {
-
     if (ahtState == SENSOR_ACTIVE)
       ahtState = SENSOR_RESTING;
   }
-
-
   else if (currentSensor == LIGHT_SENSOR) {
-
     if (lightState == SENSOR_ACTIVE)
       lightState = SENSOR_RESTING;
   }
 }
-
-
 // ------------------------------------------------------------
 // Move to next sensor
 // ------------------------------------------------------------
-
 void advanceSensor() {
-
   setCurrentSensorResting();
-
-
   if (currentSensor == SOIL_SENSOR) {
-
     startSensor(AHT_SENSOR);
   }
-
-
   else if (currentSensor == AHT_SENSOR) {
-
     startSensor(LIGHT_SENSOR);
   }
-
-
   else {
-
     startSensor(SOIL_SENSOR);
   }
 }
-
-
 // ============================================================
 //                    NORMAL SENSOR MODE
 // ============================================================
-
 void normalSensorTask() {
-
   unsigned long elapsed =
     millis() - sensorCycleStart;
-
-
   // ==========================================================
   // ACTIVE PERIOD
   // ==========================================================
-
   if (elapsed < SENSOR_ACTIVE_TIME) {
-
     if (
       lastSensorRead == 0 ||
       millis() - lastSensorRead >=
       SENSOR_READ_INTERVAL
     ) {
-
       lastSensorRead = millis();
-
-
       if (currentSensor == SOIL_SENSOR) {
-
         readSoil();
       }
-
-
       else if (currentSensor == AHT_SENSOR) {
-
         readAHT();
       }
-
-
       else if (currentSensor == LIGHT_SENSOR) {
-
         readBH1750();
       }
     }
-
-
     return;
   }
-
-
   // ==========================================================
   // REST PERIOD
   // ==========================================================
-
   if (
     elapsed <
     SENSOR_ACTIVE_TIME +
     SENSOR_REST_TIME
   ) {
-
     // Keep sensor in resting state
-
     if (currentSensor == SOIL_SENSOR) {
-
       if (soilState == SENSOR_ACTIVE)
         soilState = SENSOR_RESTING;
     }
-
-
     else if (currentSensor == AHT_SENSOR) {
-
       if (ahtState == SENSOR_ACTIVE)
         ahtState = SENSOR_RESTING;
     }
-
-
     else if (currentSensor == LIGHT_SENSOR) {
-
       if (lightState == SENSOR_ACTIVE)
         lightState = SENSOR_RESTING;
     }
-
-
     return;
   }
-
-
   // ==========================================================
   // NEXT SENSOR
   // ==========================================================
-
   advanceSensor();
 }
-
-
 // ============================================================
 //                        ALERT LOGIC
 // ============================================================
+// Each alert cause is latched independently. This prevents an unrelated
+// sensor that is merely close to its limit from keeping the whole plant in
+// ALERT_MODE after the sensor that actually triggered the alert recovers.
+const uint16_t ALERT_REASON_SOIL = 1 << 0;
+const uint16_t ALERT_REASON_TEMP_LOW = 1 << 1;
+const uint16_t ALERT_REASON_TEMP_HIGH = 1 << 2;
+const uint16_t ALERT_REASON_HUM_LOW = 1 << 3;
+const uint16_t ALERT_REASON_HUM_HIGH = 1 << 4;
+const uint16_t ALERT_REASON_LIGHT_LOW = 1 << 5;
+const uint16_t ALERT_REASON_LIGHT_HIGH = 1 << 6;
+uint16_t activeAlertReasons = 0;
 
+uint16_t currentAlertReasons() {
+  uint16_t reasons = 0;
+  if (!isnan(soilPercent) && soilPercent < SOIL_ALERT_LOW) {
+    reasons |= ALERT_REASON_SOIL;
+  }
+  if (!isnan(temperature)) {
+    if (temperature < TEMP_ALERT_LOW) reasons |= ALERT_REASON_TEMP_LOW;
+    if (temperature > TEMP_ALERT_HIGH) reasons |= ALERT_REASON_TEMP_HIGH;
+  }
+  if (!isnan(humidity)) {
+    if (humidity < HUM_ALERT_LOW) reasons |= ALERT_REASON_HUM_LOW;
+    if (humidity > HUM_ALERT_HIGH) reasons |= ALERT_REASON_HUM_HIGH;
+  }
+  if (!isnan(lightLux)) {
+    if (lightLux < LIGHT_ALERT_LOW) reasons |= ALERT_REASON_LIGHT_LOW;
+    if (lightLux > LIGHT_ALERT_HIGH) reasons |= ALERT_REASON_LIGHT_HIGH;
+  }
+  return reasons;
+}
 
 // ------------------------------------------------------------
 // Has any threshold been exceeded?
 // ------------------------------------------------------------
-
 bool alertConditionDetected() {
-
-  // Soil too dry
-  if (!isnan(soilPercent)) {
-
-    if (
-      soilPercent <
-      SOIL_ALERT_LOW
-    ) {
-
-      return true;
-    }
-  }
-
-
-  // Temperature too low/high
-  if (!isnan(temperature)) {
-
-    if (
-      temperature < TEMP_ALERT_LOW ||
-      temperature > TEMP_ALERT_HIGH
-    ) {
-
-      return true;
-    }
-  }
-
-
-  // Humidity too low/high
-  if (!isnan(humidity)) {
-
-    if (
-      humidity < HUM_ALERT_LOW ||
-      humidity > HUM_ALERT_HIGH
-    ) {
-
-      return true;
-    }
-  }
-
-
-  // Light too low/high
-  if (!isnan(lightLux)) {
-
-    if (
-      lightLux < LIGHT_ALERT_LOW ||
-      lightLux > LIGHT_ALERT_HIGH
-    ) {
-
-      return true;
-    }
-  }
-
-
-  return false;
+  return currentAlertReasons() != 0;
 }
-
-
 // ------------------------------------------------------------
 // HYSTERESIS CLEAR CONDITION
 // ------------------------------------------------------------
@@ -1359,347 +1281,209 @@ bool alertConditionDetected() {
 // Example:
 //
 // Soil <30%       → ALERT
-// Soil >35%       → safe again
+// Soil >32%       → safe again
 //
 // This prevents rapid ON/OFF switching.
 // ------------------------------------------------------------
-
 bool alertConditionCleared() {
+  if (activeAlertReasons == 0) return currentAlertReasons() == 0;
 
-  // Soil
-  if (!isnan(soilPercent)) {
-
-    if (
-      soilPercent <
-      SOIL_CLEAR_LOW
-    ) {
-
-      return false;
-    }
+  if (activeAlertReasons & ALERT_REASON_SOIL) {
+    if (isnan(soilPercent) || soilPercent < SOIL_CLEAR_LOW) return false;
   }
-
-
-  // Temperature
-  if (!isnan(temperature)) {
-
-    if (
-      temperature < TEMP_CLEAR_LOW ||
-      temperature > TEMP_CLEAR_HIGH
-    ) {
-
-      return false;
-    }
+  if (activeAlertReasons & ALERT_REASON_TEMP_LOW) {
+    if (isnan(temperature) || temperature < TEMP_CLEAR_LOW) return false;
   }
-
-
-  // Humidity
-  if (!isnan(humidity)) {
-
-    if (
-      humidity < HUM_CLEAR_LOW ||
-      humidity > HUM_CLEAR_HIGH
-    ) {
-
-      return false;
-    }
+  if (activeAlertReasons & ALERT_REASON_TEMP_HIGH) {
+    if (isnan(temperature) || temperature > TEMP_CLEAR_HIGH) return false;
   }
-
-
-  // Light
-  if (!isnan(lightLux)) {
-
-    if (
-      lightLux < LIGHT_CLEAR_LOW ||
-      lightLux > LIGHT_CLEAR_HIGH
-    ) {
-
-      return false;
-    }
+  if (activeAlertReasons & ALERT_REASON_HUM_LOW) {
+    if (isnan(humidity) || humidity < HUM_CLEAR_LOW) return false;
   }
-
-
-  return true;
+  if (activeAlertReasons & ALERT_REASON_HUM_HIGH) {
+    if (isnan(humidity) || humidity > HUM_CLEAR_HIGH) return false;
+  }
+  if (activeAlertReasons & ALERT_REASON_LIGHT_LOW) {
+    if (isnan(lightLux) || lightLux < LIGHT_CLEAR_LOW) return false;
+  }
+  if (activeAlertReasons & ALERT_REASON_LIGHT_HIGH) {
+    if (isnan(lightLux) || lightLux > LIGHT_CLEAR_HIGH) return false;
+  }
+  return currentAlertReasons() == 0;
 }
-
-
 // ============================================================
 //                      ENTER ALERT MODE
 // ============================================================
-
 void enterAlertMode() {
-
+  activeAlertReasons |= currentAlertReasons();
   if (
     systemMode ==
     ALERT_MODE
   ) {
-
     return;
   }
-
-
   systemMode =
     ALERT_MODE;
-
-
   Serial.println();
   Serial.println(
     "================================"
   );
-
   Serial.println(
     "       ALERT MODE ACTIVE"
   );
-
   Serial.println(
     "================================"
   );
-
-
   setRGB(
     true,
     false,
     false
   );
-
-
   startBeep();
+  bleAlertPending = true;
 }
-
-
 // ============================================================
 //                       EXIT ALERT MODE
 // ============================================================
-
 void exitAlertMode() {
-
   if (
     systemMode ==
     NORMAL_MODE
   ) {
-
     return;
   }
-
-
   systemMode =
     NORMAL_MODE;
-
-
+  activeAlertReasons = 0;
   Serial.println();
   Serial.println(
     "Returning to NORMAL MODE"
   );
-
-
   updateRGB();
 }
-
-
 // ============================================================
 //                   ALERT SENSOR POLLING
 // ============================================================
-
 unsigned long lastAlertRead = 0;
-
 const unsigned long ALERT_READ_INTERVAL = 1000UL;
-
-
 void alertSensorTask() {
-
   if (
     millis() - lastAlertRead <
     ALERT_READ_INTERVAL
   ) {
-
     return;
   }
-
-
   lastAlertRead = millis();
-
-
   // ==========================================================
   // In alert mode, all sensors are monitored
   // ==========================================================
-
   readSoil();
-
   readAHT();
-
   readBH1750();
-
-
   // ==========================================================
   // Keep available sensors marked ACTIVE
   // ==========================================================
-
   if (soilState == SENSOR_RESTING)
     soilState = SENSOR_ACTIVE;
-
   if (ahtDetected &&
       ahtState == SENSOR_RESTING)
     ahtState = SENSOR_ACTIVE;
-
   if (bhDetected &&
       lightState == SENSOR_RESTING)
     lightState = SENSOR_ACTIVE;
-
-
   // ==========================================================
   // Check conditions
   // ==========================================================
-
   if (
     alertConditionDetected()
   ) {
-
     enterAlertMode();
   }
-
-
   else if (
     alertConditionCleared()
   ) {
-
     exitAlertMode();
   }
 }
-
-
 // ============================================================
 //                       WIFI START
 // ============================================================
-
 void startWiFiAP() {
-
   if (wifiActive)
     return;
-
-
   Serial.println();
   Serial.println(
     "Starting Wi-Fi Access Point..."
   );
-
-
   WiFi.mode(WIFI_AP);
-
-
   bool result =
     WiFi.softAP(
       AP_SSID,
       AP_PASSWORD
     );
-
-
   if (!result) {
-
     Serial.println(
       "ERROR: Failed to start Wi-Fi AP"
     );
-
     return;
   }
-
-
   delay(200);
-
-
   IPAddress ip =
     WiFi.softAPIP();
-
-
   Serial.println();
   Serial.println(
     "Wi-Fi AP started"
   );
-
-
   Serial.print(
     "SSID: "
   );
-
   Serial.println(
     AP_SSID
   );
-
-
   Serial.print(
     "Password: "
   );
-
   Serial.println(
     AP_PASSWORD
   );
-
-
   Serial.print(
     "IP address: "
   );
-
   Serial.println(
     ip
   );
-
-
   wifiActive = true;
-
   wifiDisconnectTime = 0;
-
-
   // Start web server
   server.begin();
-
-
   Serial.println(
     "Web server started"
   );
-
-
   updateRGB();
 }
-
-
 // ============================================================
 //                       WIFI STOP
 // ============================================================
-
 void stopWiFiAP() {
-
   if (!wifiActive)
     return;
-
-
   Serial.println();
   Serial.println(
     "Stopping Wi-Fi..."
   );
-
-
   WiFi.softAPdisconnect(
     true
   );
-
-
   WiFi.mode(
     WIFI_OFF
   );
-
-
   wifiActive = false;
-
   wifiDisconnectTime = 0;
-
-
   Serial.println(
     "Wi-Fi OFF"
   );
-
-
   updateRGB();
 }
-
-
 // ============================================================
 //                         BUTTON
 // ============================================================
@@ -1717,70 +1501,49 @@ void stopWiFiAP() {
 // GPIO 16 ---- OLED UP BUTTON ------ GND
 // GPIO 17 ---- OLED DOWN BUTTON ---- GND
 // ============================================================
-
 void checkButton() {
-
   static bool lastReading =
     HIGH;
-
   static bool stableState =
     HIGH;
-
-
   bool reading =
     digitalRead(
       BUTTON_PIN
     );
-
-
   // Detect change
   if (
     reading !=
     lastReading
   ) {
-
     lastButtonChange =
       millis();
-
     lastReading =
       reading;
   }
-
-
   // Debounce
   if (
     millis() -
     lastButtonChange >=
     DEBOUNCE_TIME
   ) {
-
-
     if (
       reading !=
       stableState
     ) {
-
       stableState =
         reading;
-
-
       // Button pressed
       if (
         stableState ==
         LOW
       ) {
-
         Serial.println(
           "BUTTON PRESSED"
         );
-
         startButtonClick();
-
-
         if (startupPhase != STARTUP_READY || hasSensorProblem()) {
           return;
         }
-
         if (oledPage == 0) {
           slideshowRunning = !slideshowRunning;
           oledLastChange = millis();
@@ -1794,22 +1557,16 @@ void checkButton() {
           if (calibrationState == CAL_IDLE) calibrationBegin();
           else if (calibrationState == CAL_EDITING) calibrationSave();
         }
-
         oledLastAppRefresh = 0;
         showOLED();
       }
     }
   }
 }
-
-
 void changeOLEDPage(int direction) {
-
   unsigned long now = millis();
-
   oledLastChange = now;
   slideshowRunning = false;
-
   if (oledDetected) {
     memcpy(
       oledOutgoingFrame,
@@ -1817,43 +1574,31 @@ void changeOLEDPage(int direction) {
       sizeof(oledOutgoingFrame)
     );
   }
-
   oledPage += direction;
-
   if (oledPage >= OLED_PAGE_COUNT) {
     oledPage = 0;
   }
-
   if (oledPage < 0) {
     oledPage = OLED_PAGE_COUNT - 1;
   }
-
   // The launcher has its own selection highlight, so it does not need
   // a page-transition animation.
   if (oledAppMenuOpen) {
     oledTransitionActive = false;
     return;
   }
-
   oledTransitionStart = now;
   oledTransitionFromLeft = direction < 0;
   oledTransitionActive = true;
 }
-
-
 void setOLEDContrast() {
-
   if (!oledDetected) {
     return;
   }
-
   display.ssd1306_command(SSD1306_SETCONTRAST);
   display.ssd1306_command(oledContrast);
 }
-
-
 void updateAutomaticOLEDContrast() {
-
   if (oledManualOverrideActive) {
     if (
       millis() - oledManualOverrideStart <
@@ -1861,17 +1606,14 @@ void updateAutomaticOLEDContrast() {
     ) {
       return;
     }
-
     oledManualOverrideActive = false;
   }
-
   float brightnessPercent =
     constrain(
       lightLux / OLED_BRIGHTNESS_REFERENCE_LUX * 100.0,
       0.0,
       100.0
     );
-
   oledContrast =
     (uint8_t)map(
       (long)brightnessPercent,
@@ -1880,35 +1622,25 @@ void updateAutomaticOLEDContrast() {
       OLED_MIN_CONTRAST,
       OLED_MAX_CONTRAST
     );
-
   setOLEDContrast();
 }
-
-
 void startOLEDManualOverride() {
-
   oledManualOverrideActive = true;
   oledManualOverrideStart = millis();
 }
-
-
 void checkOLEDButton() {
-
   const int buttonPins[4] = {
     OLED_LEFT_PIN,
     OLED_RIGHT_PIN,
     OLED_UP_PIN,
     OLED_DOWN_PIN
   };
-
   static bool lastReading[4] = {HIGH, HIGH, HIGH, HIGH};
   static bool stableState[4] = {HIGH, HIGH, HIGH, HIGH};
   static bool calibrationCancelHeld = false;
-
   bool bothCalibrationButtonsPressed =
     digitalRead(OLED_UP_PIN) == LOW &&
     digitalRead(OLED_DOWN_PIN) == LOW;
-
   if (!bothCalibrationButtonsPressed) {
     calibrationCancelHeld = false;
   } else if (
@@ -1925,29 +1657,23 @@ void checkOLEDButton() {
     showOLED();
     return;
   }
-
   if (bothCalibrationButtonsPressed) {
     return;
   }
-
   for (int index = 0; index < 4; index++) {
     bool reading = digitalRead(buttonPins[index]);
-
     if (reading != lastReading[index]) {
       oledButtonChange[index] = millis();
       lastReading[index] = reading;
     }
-
     if (
       millis() - oledButtonChange[index] >=
       DEBOUNCE_TIME &&
       reading != stableState[index]
     ) {
       stableState[index] = reading;
-
       if (stableState[index] == LOW) {
         startButtonClick();
-
         if (index == 0) {
           changeOLEDPage(-1);
         } else if (index == 1) {
@@ -1971,329 +1697,210 @@ void checkOLEDButton() {
             setOLEDContrast();
           }
         }
-
         Serial.println("OLED BUTTON PRESSED");
       }
     }
   }
 }
-
-
 // ============================================================
 //                     JSON HELPER
 // ============================================================
-
 String jsonFloat(
   float value,
   int decimals
 ) {
-
   if (isnan(value))
     return "null";
-
-
   return String(
     value,
     decimals
   );
 }
-
-
 // ============================================================
 //                         WEB API
 // ============================================================
-
 void handleAPI() {
-
   String json = "{";
-
-
   // ----------------------------------------------------------
   // System
   // ----------------------------------------------------------
-
   json += "\"system\":\"";
-
-
   if (
     systemMode ==
     ALERT_MODE
   ) {
-
     json += "ALERT";
-
   } else {
-
     json += "NORMAL";
   }
-
-
   json += "\",";
-
-
   // ----------------------------------------------------------
   // Wi-Fi
   // ----------------------------------------------------------
-
   json += "\"wifi\":";
-
   json +=
     wifiActive
     ? "true"
     : "false";
-
   json += ",";
-
-
   // ----------------------------------------------------------
   // Soil
   // ----------------------------------------------------------
-
   json += "\"soil\":{";
-
-
   json += "\"value\":";
-
   json +=
     jsonFloat(
       soilPercent,
       1
     );
-
   json += ",";
-
-
   json += "\"state\":\"";
-
   json +=
     sensorStateToString(
       soilState
     );
-
   json += "\"},";
-
-
   // ----------------------------------------------------------
   // Temperature
   // ----------------------------------------------------------
-
   json += "\"temperature\":{";
-
-
   json += "\"value\":";
-
   json +=
     jsonFloat(
       temperature,
       1
     );
-
   json += ",";
-
-
   json += "\"state\":\"";
-
   json +=
     sensorStateToString(
       ahtState
     );
-
   json += "\"},";
-
-
   // ----------------------------------------------------------
   // Humidity
   // ----------------------------------------------------------
-
   json += "\"humidity\":{";
-
-
   json += "\"value\":";
-
   json +=
     jsonFloat(
       humidity,
       1
     );
-
   json += ",";
-
-
   json += "\"state\":\"";
-
   json +=
     sensorStateToString(
       ahtState
     );
-
   json += "\"},";
-
-
   // ----------------------------------------------------------
   // Light
   // ----------------------------------------------------------
-
   json += "\"light\":{";
-
-
   json += "\"value\":";
-
   json +=
     jsonFloat(
       lightLux,
       1
     );
-
   json += ",";
-
-
   json += "\"state\":\"";
-
   json +=
     sensorStateToString(
       lightState
     );
-
   json += "\"";
-
-
   json += "}";
-
-
   // ----------------------------------------------------------
   // End
   // ----------------------------------------------------------
-
   json += "}";
-
-
   server.send(
     200,
     "application/json",
     json
   );
 }
-
-
 // ============================================================
 //                    SERVE INDEX.HTML
 // ============================================================
-
 void handleRoot() {
-
   File file =
     LittleFS.open(
       "/index.html",
       "r"
     );
-
-
   if (!file) {
-
     server.send(
       404,
       "text/plain",
       "index.html not found"
     );
-
     return;
   }
-
-
   server.streamFile(
     file,
     "text/html"
   );
-
-
   file.close();
 }
-
-
 // ============================================================
 //                    SERVE STYLE.CSS
 // ============================================================
-
 void handleCSS() {
-
   File file =
     LittleFS.open(
       "/style.css",
       "r"
     );
-
-
   if (!file) {
-
     server.send(
       404,
       "text/plain",
       "style.css not found"
     );
-
     return;
   }
-
-
   server.streamFile(
     file,
     "text/css"
   );
-
-
   file.close();
 }
-
-
 // ============================================================
 //                    SERVE SCRIPT.JS
 // ============================================================
-
 void handleJS() {
-
   File file =
     LittleFS.open(
       "/script.js",
       "r"
     );
-
-
   if (!file) {
-
     server.send(
       404,
       "text/plain",
       "script.js not found"
     );
-
     return;
   }
-
-
   server.streamFile(
     file,
     "application/javascript"
   );
-
-
   file.close();
 }
-
-
 // ============================================================
 //                    SERVER NOT FOUND
 // ============================================================
-
 void handleNotFound() {
-
   server.send(
     404,
     "text/plain",
     "404 - Not Found"
   );
 }
-
-
 // ============================================================
 //                    SETUP SERVER ROUTES
 // ============================================================
@@ -2302,43 +1909,31 @@ void handleNotFound() {
 // Wi-Fi can be switched OFF/ON without
 // registering the routes again.
 // ============================================================
-
 void setupServerRoutes() {
-
   server.on(
     "/",
     HTTP_GET,
     handleRoot
   );
-
-
   server.on(
     "/style.css",
     HTTP_GET,
     handleCSS
   );
-
-
   server.on(
     "/script.js",
     HTTP_GET,
     handleJS
   );
-
-
   server.on(
     "/api",
     HTTP_GET,
     handleAPI
   );
-
-
   server.onNotFound(
     handleNotFound
   );
 }
-
-
 // ============================================================
 //                        WIFI TASK
 // ============================================================
@@ -2360,21 +1955,13 @@ void setupServerRoutes() {
 //
 // Button can wake Wi-Fi again.
 // ============================================================
-
 void wifiTask() {
-
   if (!wifiActive)
     return;
-
-
   server.handleClient();
 }
-
-
 void advanceSlideshowPage() {
-
   unsigned long now = millis();
-
   if (oledDetected) {
     memcpy(
       oledOutgoingFrame,
@@ -2382,45 +1969,30 @@ void advanceSlideshowPage() {
       sizeof(oledOutgoingFrame)
     );
   }
-
   oledPage = (oledPage + 1) % OLED_PAGE_COUNT;
   oledLastChange = now;
   oledTransitionStart = now;
   oledTransitionFromLeft = false;
   oledTransitionActive = true;
 }
-
-
 // ============================================================
 //                        OLED HEADER
 // ============================================================
-
 void oledHeader(
   const char* title
 ) {
-
   display.clearDisplay();
-
-
   display.setTextColor(
     SSD1306_WHITE
   );
-
-
   display.setTextSize(1);
-
-
   display.setCursor(
     0,
     0
   );
-
-
   display.println(
     title
   );
-
-
   display.drawLine(
     0,
     10,
@@ -2429,128 +2001,84 @@ void oledHeader(
     SSD1306_WHITE
   );
 }
-
-
 // ============================================================
 //                       OLED DISPLAY
 // ============================================================
-
 void showLegacyOLED() {
-
   if (!oledDetected)
     return;
-
-
   oledHeader(
     "SMART PLANT"
   );
-
-
   display.setCursor(
     0,
     17
   );
-
-
   // ----------------------------------------------------------
   // PAGE 0 - SYSTEM
   // ----------------------------------------------------------
-
   if (oledPage == 0) {
-
     display.println(
       "System:"
     );
-
-
     display.setTextSize(2);
-
-
     if (
       systemMode ==
       ALERT_MODE
     ) {
-
       display.println(
         "ALERT"
       );
-
     } else {
-
       display.println(
         "NORMAL"
       );
     }
-
-
     display.setTextSize(1);
   }
-
-
   // ----------------------------------------------------------
   // PAGE 1 - SOIL
   // ----------------------------------------------------------
-
   else if (oledPage == 1) {
-
     display.println(
       "Soil Moisture"
     );
-
-
     if (
       soilState ==
       SENSOR_NOT_FOUND
     ) {
-
       display.setTextSize(2);
-
       display.println(
         "N/A"
       );
-
       display.setTextSize(1);
-
       display.println(
         "NOT FOUND"
       );
     }
-
-
     else if (
       soilState ==
       SENSOR_FAULT
     ) {
-
       display.setTextSize(2);
-
       display.println(
         "ERROR"
       );
-
       display.setTextSize(1);
-
       display.println(
         "FAULT"
       );
     }
-
-
     else {
-
       display.setTextSize(2);
-
       display.print(
         soilPercent,
         1
       );
-
       display.println(
         "%"
       );
-
       display.setTextSize(1);
-
       display.println(
         sensorStateToString(
           soilState
@@ -2558,72 +2086,49 @@ void showLegacyOLED() {
       );
     }
   }
-
-
   // ----------------------------------------------------------
   // PAGE 2 - TEMPERATURE
   // ----------------------------------------------------------
-
   else if (oledPage == 2) {
-
     display.println(
       "Temperature"
     );
-
-
     if (
       ahtState ==
       SENSOR_NOT_FOUND
     ) {
-
       display.setTextSize(2);
-
       display.println(
         "N/A"
       );
-
       display.setTextSize(1);
-
       display.println(
         "NOT FOUND"
       );
     }
-
-
     else if (
       ahtState ==
       SENSOR_FAULT
     ) {
-
       display.setTextSize(2);
-
       display.println(
         "ERROR"
       );
-
       display.setTextSize(1);
-
       display.println(
         "FAULT"
       );
     }
-
-
     else {
-
       display.setTextSize(2);
-
       display.print(
         temperature,
         1
       );
-
       display.println(
         " C"
       );
-
       display.setTextSize(1);
-
       display.println(
         sensorStateToString(
           ahtState
@@ -2631,72 +2136,49 @@ void showLegacyOLED() {
       );
     }
   }
-
-
   // ----------------------------------------------------------
   // PAGE 3 - HUMIDITY
   // ----------------------------------------------------------
-
   else if (oledPage == 3) {
-
     display.println(
       "Humidity"
     );
-
-
     if (
       ahtState ==
       SENSOR_NOT_FOUND
     ) {
-
       display.setTextSize(2);
-
       display.println(
         "N/A"
       );
-
       display.setTextSize(1);
-
       display.println(
         "NOT FOUND"
       );
     }
-
-
     else if (
       ahtState ==
       SENSOR_FAULT
     ) {
-
       display.setTextSize(2);
-
       display.println(
         "ERROR"
       );
-
       display.setTextSize(1);
-
       display.println(
         "FAULT"
       );
     }
-
-
     else {
-
       display.setTextSize(2);
-
       display.print(
         humidity,
         1
       );
-
       display.println(
         "%"
       );
-
       display.setTextSize(1);
-
       display.println(
         sensorStateToString(
           ahtState
@@ -2704,72 +2186,49 @@ void showLegacyOLED() {
       );
     }
   }
-
-
   // ----------------------------------------------------------
   // PAGE 4 - LIGHT
   // ----------------------------------------------------------
-
   else if (oledPage == 4) {
-
     display.println(
       "Light"
     );
-
-
     if (
       lightState ==
       SENSOR_NOT_FOUND
     ) {
-
       display.setTextSize(2);
-
       display.println(
         "N/A"
       );
-
       display.setTextSize(1);
-
       display.println(
         "NOT FOUND"
       );
     }
-
-
     else if (
       lightState ==
       SENSOR_FAULT
     ) {
-
       display.setTextSize(2);
-
       display.println(
         "ERROR"
       );
-
       display.setTextSize(1);
-
       display.println(
         "FAULT"
       );
     }
-
-
     else {
-
       display.setTextSize(2);
-
       display.print(
         lightLux,
         0
       );
-
       display.println(
         " lux"
       );
-
       display.setTextSize(1);
-
       display.println(
         sensorStateToString(
           lightState
@@ -2777,72 +2236,44 @@ void showLegacyOLED() {
       );
     }
   }
-
-
   // ----------------------------------------------------------
   // PAGE 5 - WEBSITE
   // ----------------------------------------------------------
-
   else if (oledPage == 5) {
-
     display.println(
       "Web Dashboard"
     );
-
-
     display.setTextSize(2);
-
-
     if (wifiActive) {
-
       display.println(
         "ONLINE"
       );
-
     } else {
-
       display.println(
         "OFF"
       );
     }
-
-
     display.setTextSize(1);
-
-
     display.println();
-
-
     if (wifiActive) {
-
       display.println(
         "192.168.4.1"
       );
-
     } else {
-
       display.println(
         "Press button"
       );
     }
   }
-
-
   if (oledTransitionActive) {
-
     unsigned long transitionElapsed =
       millis() - oledTransitionStart;
-
     if (transitionElapsed >= OLED_TRANSITION_TIME) {
-
       oledTransitionActive = false;
-
     } else {
-
       float transitionProgress =
         (float)transitionElapsed /
         OLED_TRANSITION_TIME;
-
       float easedProgress =
         1.0 -
         (
@@ -2850,10 +2281,8 @@ void showLegacyOLED() {
           (1.0 - transitionProgress) *
           (1.0 - transitionProgress)
         );
-
       int revealedHeight =
         (int)(easedProgress * SCREEN_HEIGHT);
-
       display.fillRect(
         0,
         revealedHeight,
@@ -2863,23 +2292,17 @@ void showLegacyOLED() {
       );
     }
   }
-
-
   display.display();
 }
-
-
 void oledCenteredText(
   const String& text,
   int y,
   int textSize
 ) {
-
   int16_t x1;
   int16_t y1;
   uint16_t width;
   uint16_t height;
-
   display.setTextSize(textSize);
   display.getTextBounds(
     text,
@@ -2890,30 +2313,22 @@ void oledCenteredText(
     &width,
     &height
   );
-
   display.setCursor(
     (SCREEN_WIDTH - width) / 2,
     y
   );
-
   display.print(text);
 }
-
-
 void oledSensorFooter(
   SensorState state
 ) {
-
   display.setTextSize(1);
-
   if (state == SENSOR_NOT_FOUND) {
     oledCenteredText("SENSOR NOT FOUND", 47, 1);
   }
-
   else if (state == SENSOR_FAULT) {
     oledCenteredText("SENSOR FAULT", 47, 1);
   }
-
   else {
     oledCenteredText(
       sensorStateToString(state),
@@ -2922,18 +2337,14 @@ void oledSensorFooter(
     );
   }
 }
-
-
 void oledProgressBar(
   float value,
   float maximum
 ) {
-
   const int barX = 12;
   const int barY = 43;
   const int barWidth = 104;
   const int barHeight = 6;
-
   display.drawRoundRect(
     barX,
     barY,
@@ -2942,23 +2353,18 @@ void oledProgressBar(
     2,
     SSD1306_WHITE
   );
-
   if (isnan(value) || value <= 0.0) {
     return;
   }
-
   float limitedValue = value;
-
   if (limitedValue > maximum) {
     limitedValue = maximum;
   }
-
   int fillWidth =
     (int)(
       (limitedValue / maximum) *
       (barWidth - 4)
     );
-
   if (fillWidth > 0) {
     display.fillRoundRect(
       barX + 2,
@@ -2970,21 +2376,16 @@ void oledProgressBar(
     );
   }
 }
-
-
 void oledPageHeader() {
-
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
   display.setCursor(3, 1);
   display.print("PLANT MONITOR");
-
   display.setCursor(109, 1);
   display.print(oledPage + 1);
   display.print("/");
   display.print(OLED_PAGE_COUNT);
-
   display.drawLine(
     0,
     11,
@@ -2993,14 +2394,10 @@ void oledPageHeader() {
     SSD1306_WHITE
   );
 }
-
-
 void oledPageDots() {
-
   const int dotsWidth = OLED_PAGE_COUNT * 6 - 1;
   const int startX = (SCREEN_WIDTH - dotsWidth) / 2;
   const int dotY = 62;
-
   for (int index = 0; index < OLED_PAGE_COUNT; index++) {
     if (index == oledPage) {
       display.fillRect(
@@ -3019,51 +2416,37 @@ void oledPageDots() {
     }
   }
 }
-
-
 void oledSensorCheckScreen(bool allFound) {
-
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
   display.setCursor(3, 1);
   display.print("SMART PLANT");
   display.drawLine(0, 11, SCREEN_WIDTH - 1, 11, SSD1306_WHITE);
-
   oledCenteredText(allFound ? "ALL SENSORS FOUND" : "CHECK SENSOR", 16, 1);
   display.drawRoundRect(1, 27, SCREEN_WIDTH - 2, 31, 3, SSD1306_WHITE);
-
   display.setCursor(8, 31);
   display.print(soilState == SENSOR_ACTIVE || soilState == SENSOR_RESTING ? "+ SOIL" : "! SOIL MISSING");
-
   display.setCursor(8, 40);
   display.print(ahtDetected && ahtState != SENSOR_FAULT ? "+ AHT21B" : "! AHT21B MISSING");
-
   display.setCursor(8, 49);
   display.print(bhDetected && lightState != SENSOR_FAULT ? "+ BH1750" : "! BH1750 MISSING");
-
   display.display();
 }
-
-
 void showOLEDAppMenu() {
-
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
   display.setCursor(3, 1);
   display.print("PLANT APPS");
   display.drawLine(0, 11, SCREEN_WIDTH - 1, 11, SSD1306_WHITE);
-
   for (int index = 0; index < OLED_PAGE_COUNT; index++) {
     int y = 14 + index * 8;
     bool selected = index == oledPage;
-
     if (selected) {
       display.fillRoundRect(2, y - 1, 124, 9, 2, SSD1306_WHITE);
       display.setTextColor(SSD1306_BLACK);
     }
-
     display.setCursor(6, y);
     display.print(selected ? "> " : "  ");
     display.print(index + 1);
@@ -3071,13 +2454,9 @@ void showOLEDAppMenu() {
     display.print(OLED_APP_NAMES[index]);
     display.setTextColor(SSD1306_WHITE);
   }
-
   display.display();
 }
-
-
 void oledAppIcon(int app, int x, int y) {
-
   if (app == 0) {                 // Play / slideshow
     display.fillTriangle(x, y, x, y + 10, x + 9, y + 5, SSD1306_WHITE);
   } else if (app == 1) {          // Water drop
@@ -3116,15 +2495,11 @@ void oledAppIcon(int app, int x, int y) {
     display.fillRect(x + 1, y + 8, 2, 4, SSD1306_WHITE);
   }
 }
-
-
 void oledAppTitle() {
-
   int16_t x1;
   int16_t y1;
   uint16_t titleWidth;
   uint16_t titleHeight;
-
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
@@ -3137,26 +2512,20 @@ void oledAppTitle() {
     &titleWidth,
     &titleHeight
   );
-
   // Centre the icon and app name together, not just the text.
   int groupX = (SCREEN_WIDTH - (int)titleWidth - 14) / 2;
   oledAppIcon(oledPage, groupX, 3);
   display.setCursor(groupX + 14, 5);
   display.print(OLED_APP_NAMES[oledPage]);
 }
-
-
 float calibrationSavedValue() {
   if (calibrationTarget == 0) return calibrationTargetMax ? soilWetRaw : soilDryRaw;
   if (calibrationTarget == 1) return calibrationTargetMax ? TEMP_ALERT_HIGH : TEMP_ALERT_LOW;
   if (calibrationTarget == 2) return calibrationTargetMax ? HUM_ALERT_HIGH : HUM_ALERT_LOW;
   return calibrationTargetMax ? LIGHT_ALERT_HIGH : LIGHT_ALERT_LOW;
 }
-
-
 void showCalibrationApp() {
   display.setTextSize(1);
-
   if (calibrationState == CAL_IDLE) {
     oledCenteredText("SET SENSOR LIMIT", 22, 1);
     oledCenteredText(
@@ -3187,19 +2556,14 @@ void showCalibrationApp() {
     oledCenteredText("SELECT: SAVE", 50, 1);
   }
 }
-
-
 void showOLED() {
-
   if (!oledDetected) {
     return;
   }
-
   if (startupPhase == STARTUP_BOOT) {
     showStartupSplashScreen();
     return;
   }
-
   if (
     startupPhase != STARTUP_READY ||
     millis() < startupResultDisplayUntil
@@ -3207,18 +2571,15 @@ void showOLED() {
     oledSensorCheckScreen(startupSensorCheckPassed);
     return;
   }
-
   // Never leave a stale environmental reading on-screen after a sensor drops.
   if (hasSensorProblem()) {
     oledSensorCheckScreen(false);
     return;
   }
-
   if (oledAppMenuOpen) {
     showOLEDAppMenu();
     return;
   }
-
   if (oledPage == 0) {
     // Slideshow mode is intentionally dimmer than the data apps.
     display.ssd1306_command(SSD1306_SETCONTRAST);
@@ -3226,9 +2587,7 @@ void showOLED() {
   } else {
     setOLEDContrast();
   }
-
   oledAppTitle();
-
   display.drawRoundRect(
     1,
     20,
@@ -3237,7 +2596,6 @@ void showOLED() {
     3,
     SSD1306_WHITE
   );
-
   if (oledPage == 0) {
     oledCenteredText("AUTO SLIDESHOW", 24, 1);
     oledCenteredText(
@@ -3247,7 +2605,6 @@ void showOLED() {
     );
     oledCenteredText("SELECT: PLAY / PAUSE", 50, 1);
   }
-
   else if (oledPage == 1) {
     if (soilState == SENSOR_NOT_FOUND || soilState == SENSOR_FAULT) {
       oledCenteredText(
@@ -3258,10 +2615,8 @@ void showOLED() {
     } else {
       oledCenteredText(String(soilPercent, 1) + "%", 27, 2);
     }
-
     oledSensorFooter(soilState);
   }
-
   else if (oledPage == 2) {
     if (ahtState == SENSOR_NOT_FOUND || ahtState == SENSOR_FAULT) {
       oledCenteredText(
@@ -3272,10 +2627,8 @@ void showOLED() {
     } else {
       oledCenteredText(String(temperature, 1) + " C", 27, 2);
     }
-
     oledSensorFooter(ahtState);
   }
-
   else if (oledPage == 3) {
     if (ahtState == SENSOR_NOT_FOUND || ahtState == SENSOR_FAULT) {
       oledCenteredText(
@@ -3286,10 +2639,8 @@ void showOLED() {
     } else {
       oledCenteredText(String(humidity, 1) + "%", 27, 2);
     }
-
     oledSensorFooter(ahtState);
   }
-
   else if (oledPage == 4) {
     if (lightState == SENSOR_NOT_FOUND || lightState == SENSOR_FAULT) {
       oledCenteredText(
@@ -3303,17 +2654,14 @@ void showOLED() {
         0.0,
         100.0
       );
-
       oledCenteredText(
         String(lightLux, 0) + " lux  " + String(lightPercent, 0) + "%",
         27,
         1
       );
     }
-
     oledSensorFooter(lightState);
   }
-
   else if (oledPage == 5) {
     if (wifiActive) {
       oledCenteredText("ONLINE", 27, 2);
@@ -3326,18 +2674,15 @@ void showOLED() {
   } else if (oledPage == 6) {
     showCalibrationApp();
   }
-
   if (oledTransitionActive) {
     unsigned long transitionElapsed =
       millis() - oledTransitionStart;
-
     if (transitionElapsed >= OLED_TRANSITION_TIME) {
       oledTransitionActive = false;
     } else {
       float transitionProgress =
         (float)transitionElapsed /
         OLED_TRANSITION_TIME;
-
       float easedProgress =
         1.0 -
         (
@@ -3345,16 +2690,12 @@ void showOLED() {
           (1.0 - transitionProgress) *
           (1.0 - transitionProgress)
         );
-
       int incomingWidth =
         (int)(easedProgress * SCREEN_WIDTH);
-
       int splitX = oledTransitionFromLeft
         ? incomingWidth
         : SCREEN_WIDTH - incomingWidth;
-
       uint8_t* currentFrame = display.getBuffer();
-
       for (
         int row = 0;
         row < SCREEN_HEIGHT / 8;
@@ -3371,13 +2712,11 @@ void showOLED() {
           ) {
             int byteIndex =
               row * SCREEN_WIDTH + column;
-
             currentFrame[byteIndex] =
               oledOutgoingFrame[byteIndex];
           }
         }
       }
-
       display.drawLine(
         splitX,
         17,
@@ -3387,26 +2726,19 @@ void showOLED() {
       );
     }
   }
-
   display.display();
 }
-
-
 // ============================================================
 //                        OLED TASK
 // ============================================================
-
 void oledTask() {
-
   unsigned long now = millis();
-
   // Startup and sensor-fault screens are static. Refreshing them every loop
   // overwhelms the I2C bus and can delay sensor recovery, so refresh at 4 FPS.
   bool statusScreenActive =
     startupPhase != STARTUP_READY ||
     millis() < startupResultDisplayUntil ||
     hasSensorProblem();
-
   if (statusScreenActive) {
     if (
       !oledWasShowingStatusScreen ||
@@ -3415,11 +2747,9 @@ void oledTask() {
       oledLastStatusRefresh = now;
       showOLED();
     }
-
     oledWasShowingStatusScreen = true;
     return;
   }
-
   // Restore the live dashboard immediately after a sensor recovers.
   if (oledWasShowingStatusScreen) {
     oledWasShowingStatusScreen = false;
@@ -3427,14 +2757,12 @@ void oledTask() {
     showOLED();
     return;
   }
-
   if (
     slideshowRunning &&
     now - oledLastChange >= OLED_SLIDE_TIME
   ) {
     advanceSlideshowPage();
   }
-
   if (
     now - oledLastAppRefresh >= OLED_APP_REFRESH_TIME ||
     (
@@ -3442,465 +2770,334 @@ void oledTask() {
       now - oledLastFrame >= OLED_FRAME_TIME
     )
   ) {
-
     oledLastFrame = now;
     oledLastAppRefresh = now;
-
     showOLED();
   }
 }
-
-
 // ============================================================
 //                     SYSTEM LOGIC
 // ============================================================
-
 void systemLogicTask() {
-
+  uint16_t currentReasons = currentAlertReasons();
   if (
     systemMode ==
     NORMAL_MODE
   ) {
-
     if (
-      alertConditionDetected()
+      currentReasons != 0
     ) {
-
       enterAlertMode();
     }
   }
-
-
   else {
-
+    // Keep discovering new causes while already in alert mode. This is
+    // evaluated every loop, independently of the sensor display refresh.
+    activeAlertReasons |= currentReasons;
     if (
       alertConditionCleared()
     ) {
-
       exitAlertMode();
     }
   }
 }
-
-
 // ============================================================
 //                          SETUP
 // ============================================================
-
 void setup() {
-
   Serial.begin(
     115200
   );
-
   calibrationPreferences.begin("plant-cal", false);
   soilDryRaw = calibrationPreferences.getFloat("soilDry", soilDryRaw);
   soilWetRaw = calibrationPreferences.getFloat("soilWet", soilWetRaw);
-  TEMP_ALERT_LOW = calibrationPreferences.getFloat("tempMinThreshold", TEMP_ALERT_LOW);
-  TEMP_ALERT_HIGH = calibrationPreferences.getFloat("tempMaxThreshold", TEMP_ALERT_HIGH);
-  HUM_ALERT_LOW = calibrationPreferences.getFloat("humidityMinThreshold", HUM_ALERT_LOW);
-  HUM_ALERT_HIGH = calibrationPreferences.getFloat("humidityMaxThreshold", HUM_ALERT_HIGH);
-  LIGHT_ALERT_LOW = calibrationPreferences.getFloat("lightMinThreshold", LIGHT_ALERT_LOW);
-  LIGHT_ALERT_HIGH = calibrationPreferences.getFloat("lightMaxThreshold", LIGHT_ALERT_HIGH);
+  SOIL_ALERT_LOW = calibrationPreferences.getFloat("soilLow", SOIL_ALERT_LOW);
+  TEMP_ALERT_LOW = calibrationPreferences.getFloat("tempLow", TEMP_ALERT_LOW);
+  TEMP_ALERT_HIGH = calibrationPreferences.getFloat("tempHigh", TEMP_ALERT_HIGH);
+  HUM_ALERT_LOW = calibrationPreferences.getFloat("humLow", HUM_ALERT_LOW);
+  HUM_ALERT_HIGH = calibrationPreferences.getFloat("humHigh", HUM_ALERT_HIGH);
+  LIGHT_ALERT_LOW = calibrationPreferences.getFloat("lightLow", LIGHT_ALERT_LOW);
+  LIGHT_ALERT_HIGH = calibrationPreferences.getFloat("lightHigh", LIGHT_ALERT_HIGH);
+  tempScale = calibrationPreferences.getFloat("tempScale", tempScale);
   humidityOffset = calibrationPreferences.getFloat("humidityOffset", humidityOffset);
+  humidityScale = calibrationPreferences.getFloat("humidityScale", humidityScale);
   tempOffset = calibrationPreferences.getFloat("tempOffset", tempOffset);
+  lightScale = calibrationPreferences.getFloat("lightScale", lightScale);
   lightOffset = calibrationPreferences.getFloat("lightOffset", lightOffset);
-
-
+  updateAlertClearLimits();
+  printCalibrationAndAlertSettings();
   Serial.println();
   Serial.println(
     "================================"
   );
-
   Serial.println(
     " SMART PLANT MONITORING SYSTEM"
   );
-
   Serial.println(
     "================================"
   );
-
   Serial.println();
-
-
   // ==========================================================
   // GPIO
   // ==========================================================
-
   pinMode(
     BUTTON_PIN,
     INPUT_PULLUP
   );
-
-
   pinMode(OLED_LEFT_PIN, INPUT_PULLUP);
   pinMode(OLED_RIGHT_PIN, INPUT_PULLUP);
   pinMode(OLED_UP_PIN, INPUT_PULLUP);
   pinMode(OLED_DOWN_PIN, INPUT_PULLUP);
-
-
   pinMode(
     RGB_R_PIN,
     OUTPUT
   );
-
   pinMode(
     RGB_G_PIN,
     OUTPUT
   );
-
   pinMode(
     RGB_B_PIN,
     OUTPUT
   );
-
-
   pinMode(
     BUZZER_PIN,
     OUTPUT
   );
-
-
   setRGB(
     false,
     false,
     false
   );
-
-
   // ==========================================================
   // LittleFS
   // ==========================================================
-
   if (
     !LittleFS.begin(true)
   ) {
-
     Serial.println(
       "ERROR: LittleFS initialization failed!"
     );
   }
-
   else {
-
     Serial.println(
       "LittleFS initialized."
     );
   }
-
-
   // ==========================================================
   // I2C
   // ==========================================================
-
   Wire.begin(
     I2C_SDA,
     I2C_SCL
   );
-
-
   // ==========================================================
   // OLED
   // ==========================================================
-
   if (
     display.begin(
       SSD1306_SWITCHCAPVCC,
       OLED_ADDRESS
     )
   ) {
-
     oledDetected = true;
   setOLEDContrast();
-
     Serial.println(
       "OLED detected."
     );
-
-
     display.clearDisplay();
-
-
     display.setTextColor(
       SSD1306_WHITE
     );
-
-
     display.setTextSize(1);
-
-
     display.setCursor(
       20,
       20
     );
-
-
     display.println(
       "SMART PLANT"
     );
-
-
     display.setCursor(
       28,
       35
     );
-
-
     display.println(
       "STARTING..."
     );
-
-
     display.display();
-
   }
-
   else {
-
     oledDetected = false;
-
     Serial.println(
       "OLED NOT FOUND."
     );
   }
-
-
   // ==========================================================
   // STARTUP BEEP
   // ==========================================================
-
   startupBeep();
-
-
   // ==========================================================
   // AHT21B
   // ==========================================================
-
   if (
     aht.begin(&Wire)
   ) {
-
     ahtDetected = true;
-
     ahtState =
       SENSOR_RESTING;
-
     Serial.println(
       "AHT21B detected."
     );
-
   }
-
   else {
-
     ahtDetected = false;
-
     ahtState =
       SENSOR_NOT_FOUND;
-
     Serial.println(
       "AHT21B NOT FOUND."
     );
   }
-
-
   // ==========================================================
   // BH1750
   // ==========================================================
-
   if (
     bh1750.begin(
       BH1750::CONTINUOUS_HIGH_RES_MODE
     )
   ) {
-
     bhDetected = true;
-
     lightState =
       SENSOR_RESTING;
-
     Serial.println(
       "BH1750 detected."
     );
-
   }
-
   else {
-
     bhDetected = false;
-
     lightState =
       SENSOR_NOT_FOUND;
-
     Serial.println(
       "BH1750 NOT FOUND."
     );
   }
-
   if (bhDetected) {
     readBH1750();
   }
-
-
   // ==========================================================
   // SOIL
   // ==========================================================
-
   soilState =
     SENSOR_RESTING;
-
-
   // ==========================================================
   // WEB SERVER ROUTES
   // ==========================================================
-
   setupServerRoutes();
-
-
   // ==========================================================
   // START FIRST SENSOR
   // ==========================================================
-
   startSensor(
     SOIL_SENSOR
   );
-
-
   // ==========================================================
   // WIFI
   // ==========================================================
-
   WiFi.mode(
     WIFI_OFF
   );
-
   wifiActive = false;
-
-
+  // BLE stays available for the Android app while Wi-Fi is off.
+  initBLE();
   // ==========================================================
   // BOOT SPLASH SEQUENCE
   // ==========================================================
-
   startupPhase = STARTUP_BOOT;
   startupSplashIndex = 0;
   startupSplashStart = 0;
   startupSensorCheckPassed = false;
   startupCheckLastAttempt = 0;
   startupWarningLastBeep = 0;
-
-
   // ==========================================================
   // OLED
   // ==========================================================
-
   showOLED();
-
-
   Serial.println();
   Serial.println(
     "System ready."
   );
-
   Serial.println(
     "Wi-Fi is controlled from the Wi-Fi Status app."
   );
-
   Serial.println(
     "Use left/right to select an app."
   );
-
   Serial.println(
     "GPIO 27 selects an app or toggles Wi-Fi."
   );
-
   Serial.println(
     "In other apps, GPIO 27 returns to the app menu."
   );
-
   Serial.println(
     "OLED controls: GPIO 32 left, 4 right, 16 up, 17 down."
   );
-
   Serial.println(
     "Up/down change contrast by 10."
   );
-
   Serial.println();
 }
-
-
 // ============================================================
 //                           LOOP
 // ============================================================
-
 void loop() {
-
   // Button
   checkButton();
   checkOLEDButton();
-
   if (startupPhase == STARTUP_BOOT) {
     startupSplashTask();
     updateBuzzer();
     oledTask();
     updateRGB();
+    bleTask();
     return;
   }
-
   if (startupPhase == STARTUP_SENSOR_CHECK) {
     startupSensorCheckTask();
     updateBuzzer();
     oledTask();
     updateRGB();
+    bleTask();
     return;
   }
-
   if (startupPhase == STARTUP_READY) {
     if (millis() < startupResultDisplayUntil) {
       updateBuzzer();
       oledTask();
       updateRGB();
+      bleTask();
       return;
     }
   }
-
-
   // Wi-Fi
   wifiTask();
-
-
   // Buzzer
   updateBuzzer();
-
-
   // Sensors
   sensorRecoveryTask();
   calibrationTask();
-
   if (
     systemMode ==
     NORMAL_MODE
   ) {
-
     normalSensorTask();
-
   }
-
   else {
-
     alertSensorTask();
   }
-
-
   // Alert logic
   systemLogicTask();
-
-
+  // BLE telemetry and queued alert event for the connected app.
+  bleTask();
   // OLED
   oledTask();
-
-
   // RGB
   updateRGB();
 }
-
