@@ -10,6 +10,9 @@
 #include <Adafruit_AHTX0.h>
 #include <BH1750.h>
 #include <Adafruit_GFX.h>
+#include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/FreeSansBold9pt7b.h>
+#include <Fonts/FreeSansBold18pt7b.h>
 #include <Adafruit_SSD1306.h>
 // ============================================================
 //                      PIN DEFINITIONS
@@ -217,10 +220,10 @@ float LIGHT_CLEAR_HIGH = 1800.0;
 // Telemetry and alert notifications are always 20 bytes, so they
 // work even before the phone negotiates a larger BLE MTU:
 //
-//   byte 0     protocol version (1)
+//   byte 0     protocol version (2)
 //   byte 1     flags: bit 0 ALERT, bit 1 Wi-Fi, bits 2-3 soil
 //              state, bits 4-5 AHT state, bits 6-7 light state
-//   byte 2-3   reserved (0)
+//   byte 2-3   current alert reasons (uint16, little-endian)
 //   byte 4-7   soil moisture percent (float, little-endian)
 //   byte 8-11  temperature in C (float, little-endian)
 //   byte 12-15 humidity percent (float, little-endian)
@@ -244,6 +247,7 @@ bool bleAlertPending = false;
 unsigned long lastBLENotification = 0;
 const unsigned long BLE_NOTIFY_INTERVAL = 2000UL;
 void updateAlertClearLimits();
+uint16_t currentAlertReasons();
 void printCalibrationAndAlertSettings();
 void updateBLEConfigurationValue(const String& value);
 bool applyBLEConfiguration(const String& command, String& response);
@@ -262,7 +266,8 @@ unsigned long oledTransitionStart = 0;
 unsigned long oledLastStatusRefresh = 0;
 unsigned long oledLastAppRefresh = 0;
 int oledPage = 0;
-const int OLED_PAGE_COUNT = 7;
+const int OLED_PAGE_COUNT = 6;
+const int CALIBRATION_PAGE = 6;
 bool oledTransitionActive = false;
 bool oledTransitionFromLeft = false;
 bool oledWasShowingStatusScreen = false;
@@ -273,8 +278,7 @@ const char* OLED_APP_NAMES[OLED_PAGE_COUNT] = {
   "Air Temp",
   "Air Humidity",
   "Light",
-  "Wi-Fi Status",
-  "Calibrate"
+  "Wi-Fi Status"
 };
 const uint8_t SLIDESHOW_CONTRAST = 45;
 bool slideshowRunning = true;
@@ -294,6 +298,11 @@ float calibrationSamples[3] = {0, 0, 0};
 uint8_t calibrationSampleCount = 0;
 float calibrationAverage = NAN;
 unsigned long calibrationLastSample = 0;
+unsigned long calibrationIntroUntil = 0;
+bool calibrationIntroActive() {
+  return calibrationIntroUntil != 0 &&
+         (long)(calibrationIntroUntil - millis()) > 0;
+}
 uint8_t oledOutgoingFrame[
   SCREEN_WIDTH * SCREEN_HEIGHT / 8
 ];
@@ -615,12 +624,12 @@ void saveCalibrationValue(const char* key, float value) {
 }
 float calibrationLiveValue() {
   if (calibrationTarget == 0) return analogRead(SOIL_PIN);
-  if (calibrationTarget == 1) return rawTemperature;
-  if (calibrationTarget == 2) return rawHumidity;
-  return rawLightLux;
+  if (calibrationTarget == 1) return temperature;
+  if (calibrationTarget == 2) return humidity;
+  return lightLux;
 }
-float calibrationStep(float value) {
-  return fabs(value - roundf(value)) > 0.01 ? 0.1 : 1.0;
+float calibrationStep() {
+  return (calibrationTarget == 1 || calibrationTarget == 2) ? 0.1 : 1.0;
 }
 const char* calibrationSensorName() {
   if (calibrationTarget == 0) return "SOIL";
@@ -637,6 +646,19 @@ void calibrationBegin() {
 }
 void calibrationSave() {
   float value = calibrationAverage;
+  if (calibrationTarget == 1) {
+    value = constrain(value, -40.0f, 85.0f);
+    if (calibrationTargetMax) value = max(value, TEMP_ALERT_LOW + 0.1f);
+    else value = min(value, TEMP_ALERT_HIGH - 0.1f);
+  } else if (calibrationTarget == 2) {
+    value = constrain(value, 0.0f, 100.0f);
+    if (calibrationTargetMax) value = max(value, HUM_ALERT_LOW + 0.1f);
+    else value = min(value, HUM_ALERT_HIGH - 0.1f);
+  } else if (calibrationTarget == 3) {
+    value = max(0.0f, value);
+    if (calibrationTargetMax) value = max(value, LIGHT_ALERT_LOW + 1.0f);
+    else value = min(value, LIGHT_ALERT_HIGH - 1.0f);
+  }
   if (calibrationTarget == 0) {
     if (calibrationTargetMax) {
       soilWetRaw = value;
@@ -695,11 +717,37 @@ void calibrationTask() {
 }
 void calibrationAdjust(int direction) {
   if (calibrationState != CAL_EDITING || isnan(calibrationAverage)) return;
-  calibrationAverage += direction * calibrationStep(calibrationAverage);
+  calibrationAverage += direction * calibrationStep();
   if (calibrationTarget == 0) calibrationAverage = constrain(calibrationAverage, 20.0, 4080.0);
   else if (calibrationTarget == 1) calibrationAverage = constrain(calibrationAverage, -40.0, 85.0);
   else if (calibrationTarget == 2) calibrationAverage = constrain(calibrationAverage, 0.0, 100.0);
   else calibrationAverage = max(0.0f, calibrationAverage);
+}
+void calibrationEnter() {
+  oledPage = CALIBRATION_PAGE;
+  oledAppMenuOpen = false;
+  slideshowRunning = false;
+  calibrationIntroUntil = millis() + 2000UL;
+  calibrationState = CAL_IDLE;
+  calibrationSampleCount = 0;
+  calibrationAverage = NAN;
+  oledTransitionActive = false;
+  oledLastAppRefresh = 0;
+  startTone(1800, 80);
+  showOLED();
+}
+void calibrationExit() {
+  calibrationIntroUntil = 0;
+  calibrationState = CAL_IDLE;
+  calibrationSampleCount = 0;
+  calibrationAverage = NAN;
+  oledPage = 0;
+  slideshowRunning = true;
+  oledLastChange = millis();
+  oledTransitionActive = false;
+  oledLastAppRefresh = 0;
+  startTone(650, 100);
+  showOLED();
 }
 void calibrationSelectTarget(int direction) {
   int index = calibrationTarget * 2 + (calibrationTargetMax ? 1 : 0);
@@ -902,15 +950,16 @@ void updateBLEConfigurationValue(const String& value) {
   if (bleClientConnected) bleConfigCharacteristic->notify();
 }
 void buildBLESensorPacket(uint8_t packet[20]) {
-  packet[0] = 1;
+  packet[0] = 2;
   packet[1] =
     (systemMode == ALERT_MODE ? 0x01 : 0x00) |
     (wifiActive ? 0x02 : 0x00) |
     (sensorStateToBLE(soilState) << 2) |
     (sensorStateToBLE(ahtState) << 4) |
     (sensorStateToBLE(lightState) << 6);
-  packet[2] = 0;
-  packet[3] = 0;
+  uint16_t alertReasons = currentAlertReasons();
+  packet[2] = alertReasons & 0xFF;
+  packet[3] = (alertReasons >> 8) & 0xFF;
   memcpy(packet + 4, &soilPercent, sizeof(float));
   memcpy(packet + 8, &temperature, sizeof(float));
   memcpy(packet + 12, &humidity, sizeof(float));
@@ -1540,6 +1589,9 @@ void checkButton() {
         Serial.println(
           "BUTTON PRESSED"
         );
+        if (oledPage == CALIBRATION_PAGE && calibrationIntroActive()) {
+          return;
+        }
         startButtonClick();
         if (startupPhase != STARTUP_READY || hasSensorProblem()) {
           return;
@@ -1553,7 +1605,7 @@ void checkButton() {
           } else {
             startWiFiAP();
           }
-        } else if (oledPage == 6) {
+        } else if (oledPage == CALIBRATION_PAGE) {
           if (calibrationState == CAL_IDLE) calibrationBegin();
           else if (calibrationState == CAL_EDITING) calibrationSave();
         }
@@ -1637,29 +1689,19 @@ void checkOLEDButton() {
   };
   static bool lastReading[4] = {HIGH, HIGH, HIGH, HIGH};
   static bool stableState[4] = {HIGH, HIGH, HIGH, HIGH};
-  static bool calibrationCancelHeld = false;
+  static bool calibrationShortcutHeld = false;
   bool bothCalibrationButtonsPressed =
     digitalRead(OLED_UP_PIN) == LOW &&
     digitalRead(OLED_DOWN_PIN) == LOW;
-  if (!bothCalibrationButtonsPressed) {
-    calibrationCancelHeld = false;
-  } else if (
-    !calibrationCancelHeld &&
-    oledPage == 6 &&
-    calibrationState != CAL_IDLE
-  ) {
-    calibrationCancelHeld = true;
-    calibrationState = CAL_IDLE;
-    calibrationSampleCount = 0;
-    calibrationAverage = NAN;
-    startTone(650, 100);
-    oledLastAppRefresh = 0;
-    showOLED();
-    return;
-  }
   if (bothCalibrationButtonsPressed) {
+    if (!calibrationShortcutHeld) {
+      calibrationShortcutHeld = true;
+      if (oledPage == CALIBRATION_PAGE) calibrationExit();
+      else calibrationEnter();
+    }
     return;
   }
+  calibrationShortcutHeld = false;
   for (int index = 0; index < 4; index++) {
     bool reading = digitalRead(buttonPins[index]);
     if (reading != lastReading[index]) {
@@ -1673,13 +1715,16 @@ void checkOLEDButton() {
     ) {
       stableState[index] = reading;
       if (stableState[index] == LOW) {
+        if (oledPage == CALIBRATION_PAGE && calibrationIntroActive()) {
+          continue;
+        }
         startButtonClick();
         if (index == 0) {
-          changeOLEDPage(-1);
+          if (oledPage != CALIBRATION_PAGE) changeOLEDPage(-1);
         } else if (index == 1) {
-          changeOLEDPage(1);
+          if (oledPage != CALIBRATION_PAGE) changeOLEDPage(1);
         } else if (index == 2) {
-          if (oledPage == 6) {
+          if (oledPage == CALIBRATION_PAGE) {
             if (calibrationState == CAL_IDLE) calibrationSelectTarget(1);
             else calibrationAdjust(1);
           } else {
@@ -1688,7 +1733,7 @@ void checkOLEDButton() {
             setOLEDContrast();
           }
         } else if (index == 3) {
-          if (oledPage == 6) {
+          if (oledPage == CALIBRATION_PAGE) {
             if (calibrationState == CAL_IDLE) calibrationSelectTarget(-1);
             else calibrationAdjust(-1);
           } else {
@@ -1759,7 +1804,13 @@ void handleAPI() {
     sensorStateToString(
       soilState
     );
-  json += "\"},";
+  json += "\",";
+  json += "\"alert\":";
+  json +=
+    (!isnan(soilPercent) && soilPercent < SOIL_ALERT_LOW)
+    ? "true"
+    : "false";
+  json += "},";
   // ----------------------------------------------------------
   // Temperature
   // ----------------------------------------------------------
@@ -1776,7 +1827,14 @@ void handleAPI() {
     sensorStateToString(
       ahtState
     );
-  json += "\"},";
+  json += "\",";
+  json += "\"alert\":";
+  json +=
+    (!isnan(temperature) &&
+     (temperature < TEMP_ALERT_LOW || temperature > TEMP_ALERT_HIGH))
+    ? "true"
+    : "false";
+  json += "},";
   // ----------------------------------------------------------
   // Humidity
   // ----------------------------------------------------------
@@ -1793,7 +1851,14 @@ void handleAPI() {
     sensorStateToString(
       ahtState
     );
-  json += "\"},";
+  json += "\",";
+  json += "\"alert\":";
+  json +=
+    (!isnan(humidity) &&
+     (humidity < HUM_ALERT_LOW || humidity > HUM_ALERT_HIGH))
+    ? "true"
+    : "false";
+  json += "},";
   // ----------------------------------------------------------
   // Light
   // ----------------------------------------------------------
@@ -1810,7 +1875,13 @@ void handleAPI() {
     sensorStateToString(
       lightState
     );
-  json += "\"";
+  json += "\",";
+  json += "\"alert\":";
+  json +=
+    (!isnan(lightLux) &&
+     (lightLux < LIGHT_ALERT_LOW || lightLux > LIGHT_ALERT_HIGH))
+    ? "true"
+    : "false";
   json += "}";
   // ----------------------------------------------------------
   // End
@@ -2294,30 +2365,73 @@ void showLegacyOLED() {
   }
   display.display();
 }
-void oledCenteredText(
+void oledCenteredTextInArea(
   const String& text,
   int y,
-  int textSize
+  int textSize,
+  int left,
+  int right
 ) {
   int16_t x1;
   int16_t y1;
   uint16_t width;
   uint16_t height;
-  display.setTextSize(textSize);
+  bool usingLargeFont = textSize >= 2;
+  // Keep compact status text in the original bitmap font. Larger readings
+  // use a clean sans-serif font so the values are easier to scan at a glance.
+  if (usingLargeFont) {
+    display.setFont(&FreeSansBold9pt7b);
+    display.setTextSize(1);
+  } else {
+    display.setFont();
+    display.setTextSize(1);
+  }
   display.getTextBounds(
     text,
     0,
-    y,
+    0,
     &x1,
     &y1,
     &width,
     &height
   );
   display.setCursor(
-    (SCREEN_WIDTH - width) / 2,
-    y
+    (left + right - width) / 2 - x1,
+    usingLargeFont ? y - y1 : y
   );
   display.print(text);
+  // Do not let the custom font leak into the next small status label.
+  display.setFont();
+  display.setTextSize(1);
+}
+void oledCenteredText(
+  const String& text,
+  int y,
+  int textSize
+) {
+  oledCenteredTextInArea(text, y, textSize, 0, SCREEN_WIDTH);
+}
+void oledCenteredFontTextInArea(
+  const String& text,
+  int y,
+  const GFXfont* font,
+  int left,
+  int right
+) {
+  int16_t x1;
+  int16_t y1;
+  uint16_t width;
+  uint16_t height;
+  display.setFont(font);
+  display.setTextSize(1);
+  display.getTextBounds(text, 0, 0, &x1, &y1, &width, &height);
+  display.setCursor(
+    (left + right - width) / 2 - x1,
+    y - y1
+  );
+  display.print(text);
+  display.setFont();
+  display.setTextSize(1);
 }
 void oledSensorFooter(
   SensorState state
@@ -2502,6 +2616,7 @@ void oledAppTitle() {
   uint16_t titleHeight;
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
+  display.setFont(&FreeSansBold9pt7b);
   display.setTextSize(1);
   display.getTextBounds(
     OLED_APP_NAMES[oledPage],
@@ -2515,8 +2630,10 @@ void oledAppTitle() {
   // Centre the icon and app name together, not just the text.
   int groupX = (SCREEN_WIDTH - (int)titleWidth - 14) / 2;
   oledAppIcon(oledPage, groupX, 3);
-  display.setCursor(groupX + 14, 5);
+  display.setCursor(groupX + 14, 13);
   display.print(OLED_APP_NAMES[oledPage]);
+  display.setFont();
+  display.setTextSize(1);
 }
 float calibrationSavedValue() {
   if (calibrationTarget == 0) return calibrationTargetMax ? soilWetRaw : soilDryRaw;
@@ -2524,37 +2641,116 @@ float calibrationSavedValue() {
   if (calibrationTarget == 2) return calibrationTargetMax ? HUM_ALERT_HIGH : HUM_ALERT_LOW;
   return calibrationTargetMax ? LIGHT_ALERT_HIGH : LIGHT_ALERT_LOW;
 }
+void oledCalibrationTargetLabel(const String& text, int y) {
+  // Keep long labels such as HUMIDITY MIN/MAX inside the 128-pixel display.
+  // The rest of the calibration screen keeps its existing font treatment.
+  oledCenteredText(text, y, 1);
+}
+void oledCalibrationArrowUp(int centerX, int topY) {
+  display.fillTriangle(
+    centerX,
+    topY,
+    centerX - 5,
+    topY + 7,
+    centerX + 5,
+    topY + 7,
+    SSD1306_WHITE
+  );
+}
+void oledCalibrationArrowDown(int centerX, int topY) {
+  display.fillTriangle(
+    centerX - 5,
+    topY,
+    centerX + 5,
+    topY,
+    centerX,
+    topY + 7,
+    SSD1306_WHITE
+  );
+}
+void oledCalibrationSelectionArrows() {
+  const int arrowX = 119;
+  oledCalibrationArrowUp(arrowX, 2);
+  display.drawLine(arrowX, 10, arrowX, 24, SSD1306_WHITE);
+  display.drawLine(arrowX, 31, arrowX, 45, SSD1306_WHITE);
+  oledCalibrationArrowDown(arrowX, 46);
+}
+const char* calibrationDisplaySensorName() {
+  if (calibrationTarget == 0) return "SOIL";
+  if (calibrationTarget == 1) return "TEMP";
+  if (calibrationTarget == 2) return "HUMIDITY";
+  return "LIGHT";
+}
 void showCalibrationApp() {
   display.setTextSize(1);
   if (calibrationState == CAL_IDLE) {
-    oledCenteredText("SET SENSOR LIMIT", 22, 1);
-    oledCenteredText(
-      String(calibrationSensorName()) + (calibrationTargetMax ? " MAX" : " MIN"),
-      31,
-      1
+    display.drawRect(3, 2, 109, 44, SSD1306_WHITE);
+    oledCenteredTextInArea(calibrationDisplaySensorName(), 8, 2, 4, 111);
+    oledCenteredTextInArea(
+      calibrationTargetMax ? "MAX" : "MIN",
+      28,
+      2,
+      4,
+      111
     );
-    oledCenteredText("UP/DOWN: CHOOSE", 42, 1);
-    oledCenteredText("SELECT: MEASURE", 50, 1);
+    oledCalibrationSelectionArrows();
+    oledCenteredText("CENTER: MEASURE", 54, 1);
   } else if (calibrationState == CAL_SAMPLING) {
-    oledCenteredText("MEASURING", 22, 1);
-    oledCenteredText(
+    oledCenteredText("TAKING 3 READINGS", 16, 1);
+    oledCalibrationTargetLabel(
       String(calibrationSensorName()) + (calibrationTargetMax ? " MAX" : " MIN"),
-      30,
-      1
+      26
     );
+    oledCenteredText("HOLD SENSOR STEADY", 38, 1);
+    display.drawRoundRect(15, 46, 98, 7, 2, SSD1306_WHITE);
+    if (calibrationSampleCount > 0) {
+      display.fillRoundRect(17, 48, calibrationSampleCount * 31, 3, 1, SSD1306_WHITE);
+    }
     oledCenteredText(
       String(calibrationSampleCount) + " / 3 READINGS",
-      39,
+      54,
       1
     );
-    oledCenteredText("HOLD SENSOR STEADY", 49, 1);
   } else {
-    int decimals = calibrationStep(calibrationAverage) < 1.0 ? 1 : 0;
-    oledCenteredText("AVERAGE READY", 21, 1);
-    oledCenteredText(String(calibrationAverage, decimals), 28, 2);
-    oledCenteredText("UP/DOWN: ADJUST", 44, 1);
-    oledCenteredText("SELECT: SAVE", 50, 1);
+    int decimals = calibrationStep() < 1.0 ? 1 : 0;
+    oledCenteredText("AVERAGE READING", 4, 1);
+    oledCenteredFontTextInArea(
+      String(calibrationAverage, decimals),
+      17,
+      &FreeSansBold18pt7b,
+      3,
+      125
+    );
+    oledCenteredText(
+      calibrationStep() < 1.0 ? "UP/DOWN: +/-0.1" : "UP/DOWN: +/-1",
+      46,
+      1
+    );
+    oledCenteredText("CENTER: SAVE", 54, 1);
   }
+}
+void showCalibrationScreen() {
+  if (calibrationIntroActive()) {
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextSize(1);
+    oledCenteredFontTextInArea("CALIBRATION", 13, &FreeSans9pt7b, 4, 124);
+    oledCenteredFontTextInArea("MODE", 36, &FreeSans9pt7b, 4, 124);
+    display.display();
+    return;
+  }
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  if (calibrationState != CAL_IDLE) {
+    if (calibrationState == CAL_EDITING) {
+      display.drawRect(1, 1, SCREEN_WIDTH - 2, 62, SSD1306_WHITE);
+    } else {
+      display.drawRoundRect(1, 1, SCREEN_WIDTH - 2, 62, 4, SSD1306_WHITE);
+    }
+  }
+  showCalibrationApp();
+  display.display();
 }
 void showOLED() {
   if (!oledDetected) {
@@ -2578,6 +2774,11 @@ void showOLED() {
   }
   if (oledAppMenuOpen) {
     showOLEDAppMenu();
+    return;
+  }
+  if (oledPage == CALIBRATION_PAGE) {
+    setOLEDContrast();
+    showCalibrationScreen();
     return;
   }
   if (oledPage == 0) {
@@ -2649,16 +2850,15 @@ void showOLED() {
         2
       );
     } else {
-      float lightPercent = constrain(
-        lightLux / OLED_BRIGHTNESS_REFERENCE_LUX * 100.0,
-        0.0,
-        100.0
-      );
-      oledCenteredText(
-        String(lightLux, 0) + " lux  " + String(lightPercent, 0) + "%",
-        27,
-        1
-      );
+      float lightRange = LIGHT_ALERT_HIGH - LIGHT_ALERT_LOW;
+      float lightPercent = lightRange > 0.0
+        ? constrain(
+            (lightLux - LIGHT_ALERT_LOW) / lightRange * 100.0,
+            0.0,
+            100.0
+          )
+        : 0.0;
+      oledCenteredText(String(lightPercent, 0) + "%", 27, 2);
     }
     oledSensorFooter(lightState);
   }
@@ -2671,8 +2871,6 @@ void showOLED() {
       oledCenteredText("OFFLINE", 27, 2);
       oledCenteredText("SELECT: TURN ON", 48, 1);
     }
-  } else if (oledPage == 6) {
-    showCalibrationApp();
   }
   if (oledTransitionActive) {
     unsigned long transitionElapsed =
@@ -2793,7 +2991,14 @@ void systemLogicTask() {
   else {
     // Keep discovering new causes while already in alert mode. This is
     // evaluated every loop, independently of the sensor display refresh.
+    uint16_t newReasons =
+      currentReasons & ~activeAlertReasons;
     activeAlertReasons |= currentReasons;
+    if (newReasons != 0) {
+      // Tell the connected app about a newly affected condition too, not
+      // only the first condition that put the monitor into alert mode.
+      bleAlertPending = true;
+    }
     if (
       alertConditionCleared()
     ) {
@@ -3082,7 +3287,6 @@ void loop() {
   updateBuzzer();
   // Sensors
   sensorRecoveryTask();
-  calibrationTask();
   if (
     systemMode ==
     NORMAL_MODE
@@ -3092,6 +3296,9 @@ void loop() {
   else {
     alertSensorTask();
   }
+  // Take calibration samples after the regular sensor update so the first
+  // sample is also a fresh reading from the connected sensor.
+  calibrationTask();
   // Alert logic
   systemLogicTask();
   // BLE telemetry and queued alert event for the connected app.

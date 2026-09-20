@@ -43,6 +43,7 @@ data class PlantTelemetry(
     val light: SensorReading,
     val isAlert: Boolean,
     val wifiEnabled: Boolean,
+    val alertReasons: Int? = null,
     val receivedAt: Long = System.currentTimeMillis()
 )
 
@@ -335,8 +336,15 @@ class PlantBleManager(
     }
 
     private fun parseTelemetry(value: ByteArray): PlantTelemetry? {
-        if (value.size < 20 || value[0].toInt() != 1) return null
+        if (value.size < 20) return null
+        val protocolVersion = value[0].toInt() and 0xFF
+        if (protocolVersion !in 1..2) return null
         val flags = value[1].toInt() and 0xFF
+        val alertReasons = if (protocolVersion >= 2) {
+            (value[2].toInt() and 0xFF) or ((value[3].toInt() and 0xFF) shl 8)
+        } else {
+            null
+        }
         fun floatAt(offset: Int): Float? {
             val number = ByteBuffer.wrap(value, offset, 4).order(ByteOrder.LITTLE_ENDIAN).float
             return number.takeUnless { it.isNaN() || it.isInfinite() }
@@ -353,7 +361,8 @@ class PlantBleManager(
             humidity = SensorReading(floatAt(12), stateAt(4)),
             light = SensorReading(floatAt(16), stateAt(6)),
             isAlert = flags and 0x01 != 0,
-            wifiEnabled = flags and 0x02 != 0
+            wifiEnabled = flags and 0x02 != 0,
+            alertReasons = alertReasons
         )
     }
 

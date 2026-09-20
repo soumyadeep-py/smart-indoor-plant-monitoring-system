@@ -16,12 +16,18 @@ const systemMessage =
 
 // Sensor elements
 
+const soilCard =
+    document.getElementById("soilCard");
+
 const soilValue =
     document.getElementById("soilValue");
 
 const soilState =
     document.getElementById("soilState");
 
+
+const temperatureCard =
+    document.getElementById("temperatureCard");
 
 const temperatureValue =
     document.getElementById("temperatureValue");
@@ -30,12 +36,18 @@ const temperatureState =
     document.getElementById("temperatureState");
 
 
+const humidityCard =
+    document.getElementById("humidityCard");
+
 const humidityValue =
     document.getElementById("humidityValue");
 
 const humidityState =
     document.getElementById("humidityState");
 
+
+const lightCard =
+    document.getElementById("lightCard");
 
 const lightValue =
     document.getElementById("lightValue");
@@ -84,17 +96,30 @@ function setConnectionStatus(connected) {
 // ======================================================
 
 function updateSensor(
+    cardElement,
     valueElement,
     stateElement,
     sensor
 ) {
 
-    const state =
-        sensor.state;
+    cardElement.classList.remove(
+        "alert",
+        "sensor-error"
+    );
 
+    stateElement.classList.remove(
+        "normal",
+        "alert",
+        "error"
+    );
 
-    stateElement.textContent =
-        state;
+    if (!sensor) {
+        valueElement.textContent = "—";
+        stateElement.textContent = "NO DATA";
+        stateElement.classList.add("error");
+        cardElement.classList.add("sensor-error");
+        return;
+    }
 
 
     // Sensor missing / invalid
@@ -107,6 +132,12 @@ function updateSensor(
         valueElement.textContent =
             "—";
 
+        stateElement.textContent =
+            sensor.state || "NO DATA";
+
+        stateElement.classList.add("error");
+        cardElement.classList.add("sensor-error");
+
         return;
     }
 
@@ -115,6 +146,22 @@ function updateSensor(
 
     valueElement.textContent =
         Number(sensor.value).toFixed(1);
+
+    // The firmware evaluates this using the saved alert limits, so the
+    // web UI stays correct even after the user calibrates the thresholds.
+    const isAlert =
+        sensor.alert === true;
+
+    if (isAlert) {
+        cardElement.classList.add("alert");
+        stateElement.textContent = "ALERT";
+        stateElement.classList.add("alert");
+    } else {
+        stateElement.textContent =
+            sensor.state || "ACTIVE";
+
+        stateElement.classList.add("normal");
+    }
 }
 
 
@@ -124,10 +171,25 @@ function updateSensor(
 
 function updateSystemMessage(data) {
 
+    const alertSensors = [
+        ["Soil moisture", data.soil],
+        ["Temperature", data.temperature],
+        ["Humidity", data.humidity],
+        ["Light", data.light]
+    ]
+        .filter(([, sensor]) => sensor && sensor.alert === true)
+        .map(([name]) => name);
+
     if (data.system === "ALERT") {
 
-        systemMessage.textContent =
-            "One or more plant conditions have exceeded the configured threshold.";
+        const verb =
+            alertSensors.length === 1 ? "is" : "are";
+
+        systemMessage.textContent = alertSensors.length
+            ? `Alert: ${alertSensors.join(
+                ", "
+            )} ${verb} outside the configured limit.`
+            : "One or more plant conditions have exceeded the configured threshold.";
 
         systemStatus.textContent =
             "ALERT";
@@ -220,6 +282,7 @@ async function updateData() {
         // Sensors
 
         updateSensor(
+            soilCard,
             soilValue,
             soilState,
             data.soil
@@ -227,6 +290,7 @@ async function updateData() {
 
 
         updateSensor(
+            temperatureCard,
             temperatureValue,
             temperatureState,
             data.temperature
@@ -234,6 +298,7 @@ async function updateData() {
 
 
         updateSensor(
+            humidityCard,
             humidityValue,
             humidityState,
             data.humidity
@@ -241,6 +306,7 @@ async function updateData() {
 
 
         updateSensor(
+            lightCard,
             lightValue,
             lightState,
             data.light

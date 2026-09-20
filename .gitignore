@@ -1,0 +1,64 @@
+# Smart Plant Monitoring System
+# Keep source code, firmware, web assets, tests, and build configuration tracked.
+
+# Ignore itself
+.gitignore 
+
+# Root project editor metadata
+.idea/
+.vscode/
+.agents/
+.codex/
+*.iml
+
+# Android app generated files and caches
+android-app/.gradle/
+android-app/.idea/
+android-app/.kotlin/
+android-app/app/build/
+android-app/**/build/
+android-app/**/out/
+android-app/local.properties
+android-app/.externalNativeBuild/
+android-app/.cxx/
+android-app/captures/
+
+# Gradle cache files anywhere in the project
+.gradle/
+.gradle-user/
+.kotlin/
+**/build/
+**/out/
+**/.externalNativeBuild/
+**/.cxx/
+**/captures/
+
+# Android package artifacts
+*.apk
+*.aab
+*.apks
+*.idsig
+*.hprof
+
+# Arduino / embedded generated output
+code/ArduinoOutput/
+ArduinoOutput
+code/build/
+.pio/
+*.hex
+*.bin
+*.elf
+*.map
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+!app.apk
