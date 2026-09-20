@@ -115,6 +115,14 @@ Smart Plant Monitoring System/
 └── .vscode/
 ```
 
+## ⚙️ Installation and setup
+
+1. Open `code/code.ino` in the Arduino IDE or ESP32 development environment.
+2. Flash the firmware to the ESP32 board.
+3. Upload the files from `code/data` to the ESP32 LittleFS storage so the web dashboard works correctly. For this, press <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd> and then search "Upload LittleFS to Pico/ESP8266/ESP32".
+4. Install the Android APK on a phone by opening `app.apk` and following the installation prompts.
+5. Enable Bluetooth on the phone and allow the app to access Nearby devices and notifications when prompted. You may also connect to Wifi of the ESP32 which is `SmartPlant-ESP32` and then putting the password `plant1234` and then on browser, go to `192.168.4.1`. You will see dashboard of sensor readings and system status.
+
 ## 📱 Android app
 
 The `app` module is a native Jetpack Compose Android client for the BLE service exposed by the ESP32. It provides:
@@ -128,10 +136,10 @@ The `app` module is a native Jetpack Compose Android client for the BLE service 
 
 ### Running the app
 
-1. Flash `code/code.ino` to the ESP32 with the files in `code/data` uploaded to LittleFS.
-2. Open the project in Android Studio and run the `app` configuration on an Android phone with Bluetooth enabled.
-3. Grant Nearby devices and notification permissions when prompted.
-4. Tap **Find ESP32 monitor**. The app searches for the advertised device named `Smart Plant Monitor`.
+1. Power on the ESP32 after flashing the firmware.
+2. Open the installed Android app on the phone.
+3. Tap **Find ESP32 monitor**. The app searches for the advertised device named `Smart Plant Monitor`.
+4. Connect to the device and begin monitoring the readings.
 
 The app uses the custom BLE service already defined in the firmware. Settings are sent as short `key=value` commands and are persisted by the ESP32, so calibration and alert limits remain after a reboot. The phone creates the Android notification when it receives an alert event; the ESP32 itself cannot create a phone notification directly.
 

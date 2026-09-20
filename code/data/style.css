@@ -172,6 +172,28 @@ body {
     flex-direction: column;
 
     justify-content: space-between;
+
+    transition:
+        border-color 180ms ease,
+        box-shadow 180ms ease,
+        background-color 180ms ease;
+}
+
+.sensor-card.alert {
+    border: 2px solid #e74c3c;
+
+    background: #fff6f5;
+
+    box-shadow: 0 0 0 3px rgba(231, 76, 60, 0.12);
+}
+
+.sensor-card.alert .sensor-value {
+    color: #c0392b;
+}
+
+.sensor-card.sensor-error {
+    border-color: #f0ad4e;
+    background: #fffaf1;
 }
 
 .sensor-header {
@@ -211,6 +233,22 @@ body {
     background: #eeeeee;
 
     height: fit-content;
+}
+
+.sensor-state.normal {
+    color: #218c4e;
+    background: #eaf8ef;
+}
+
+.sensor-state.alert {
+    color: #b42318;
+    background: #ffe2df;
+    border: 1px solid #f3aaa2;
+}
+
+.sensor-state.error {
+    color: #a66300;
+    background: #fff0d2;
 }
 
 
