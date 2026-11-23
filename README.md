@@ -84,12 +84,11 @@ The current `code/code.ino` defaults to an ESP32-WROOM-32 setup:
 | Component | Default pin |
 |---|---:|
 | Soil moisture ADC | GPIO 34 |
-| Pump transistor control | GPIO 5 |
+| Pump transistor control | GPIO 23 |
 
-GPIO 5 in the sketch is the signal to the transistor base/gate; it does not
-power the pump directly. GPIO 5 is a boot-strapping pin, so if it affects boot
-on your particular board, move the transistor signal to another unused digital
-output and update `PUMP_PIN`.
+GPIO 23 in the sketch is the signal to the transistor base/gate; it does not
+power the pump directly. GPIO 23 is used because it is an available
+non-strapping digital output on the ESP32-WROOM-32 board.
 
 Use a separate supply for the pump, connect the pump supply ground to ESP32 GND,
 add a base/gate resistor, and place a flyback diode across a DC pump. The pump

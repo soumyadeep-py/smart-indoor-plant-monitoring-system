@@ -29,7 +29,7 @@
 #define RGB_G_PIN      26
 #define RGB_B_PIN      33
 #define BUZZER_PIN     14
-#define PUMP_PIN       5
+#define PUMP_PIN       23
 // ============================================================
 //                         OLED
 // ============================================================
