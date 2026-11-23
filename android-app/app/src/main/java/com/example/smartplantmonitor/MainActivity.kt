@@ -40,6 +40,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -94,7 +95,9 @@ class MainActivity : ComponentActivity() {
                     message = message,
                     onConnect = ::requestPermissionsAndScan,
                     onDisconnect = ::disconnectMonitor,
+                    onSetMotor = ::setMotor,
                     onSaveLimits = ::saveLimitFields,
+                    onSaveWatering = ::saveWateringSettings,
                     onSaveCalibration = ::saveCalibrationFields,
                     onSaveCalibrationLimit = ::saveCalibrationLimit,
                     onDismissMessage = { message = null }
@@ -203,6 +206,7 @@ class MainActivity : ComponentActivity() {
                     light = readSensorReading(intent, "light"),
                     isAlert = intent.getBooleanExtra(MonitorServiceContract.EXTRA_IS_ALERT, false),
                     wifiEnabled = intent.getBooleanExtra(MonitorServiceContract.EXTRA_WIFI, false),
+                    motorOn = intent.getBooleanExtra(MonitorServiceContract.EXTRA_MOTOR, false),
                     alertReasons = if (intent.hasExtra(MonitorServiceContract.EXTRA_ALERT_REASONS)) {
                         intent.getIntExtra(MonitorServiceContract.EXTRA_ALERT_REASONS, 0)
                     } else {
@@ -243,6 +247,9 @@ class MainActivity : ComponentActivity() {
     private fun readConfig(intent: Intent): PlantConfig = PlantConfig(
         soilDry = intent.getFloatExtra("config_soilDry", 3000f),
         soilWet = intent.getFloatExtra("config_soilWet", 1500f),
+        wateringEnabled = intent.getBooleanExtra("config_wateringEnabled", true),
+        wateringStart = intent.getFloatExtra("config_wateringStart", 30f),
+        wateringStop = intent.getFloatExtra("config_wateringStop", 40f),
         tempScale = intent.getFloatExtra("config_tempScale", 1f),
         tempOffset = intent.getFloatExtra("config_tempOffset", 0f),
         humidityScale = intent.getFloatExtra("config_humidityScale", 1f),
@@ -300,6 +307,35 @@ class MainActivity : ComponentActivity() {
         showMessage("Alert limits sent to the monitor.")
     }
 
+    private fun saveWateringSettings(enabled: Boolean, startText: String, stopText: String) {
+        val start = startText.trim().toFloatOrNull()
+        val stop = stopText.trim().toFloatOrNull()
+        if (start == null || stop == null || !start.isFinite() || !stop.isFinite()) {
+            showMessage("Enter valid watering limits.")
+            return
+        }
+        if (start !in 0f..100f || stop !in 0f..100f || start >= stop) {
+            showMessage("Watering start must be lower than the stop limit, from 0 to 100%.")
+            return
+        }
+        sendMonitorCommand(MonitorServiceContract.ACTION_WRITE_CONFIG, "waterenabled", if (enabled) "1" else "0")
+        // Keep each intermediate BLE update valid: if the new start would be
+        // at/above the current stop, send stop first; otherwise send start first.
+        if (start >= appState.config.wateringStop) {
+            sendMonitorCommand(MonitorServiceContract.ACTION_WRITE_CONFIG, "waterstop", stop.toString())
+            sendMonitorCommand(MonitorServiceContract.ACTION_WRITE_CONFIG, "waterstart", start.toString())
+        } else {
+            sendMonitorCommand(MonitorServiceContract.ACTION_WRITE_CONFIG, "waterstart", start.toString())
+            sendMonitorCommand(MonitorServiceContract.ACTION_WRITE_CONFIG, "waterstop", stop.toString())
+        }
+        showMessage(if (enabled) "Automatic watering enabled and saved." else "Automatic watering disabled and saved.")
+    }
+
+    private fun setMotor(on: Boolean) {
+        sendMonitorCommand(MonitorServiceContract.ACTION_WRITE_CONFIG, "motor", if (on) "1" else "0")
+        showMessage(if (on) "Motor turned on for manual watering." else "Motor turned off.")
+    }
+
     private fun saveCalibrationLimit(key: String, value: String): Boolean {
         val parsed = value.trim().toFloatOrNull()
         if (parsed == null || !parsed.isFinite()) {
@@ -337,7 +373,9 @@ private fun PlantApp(
     message: String?,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
+    onSetMotor: (Boolean) -> Unit,
     onSaveLimits: (Map<String, String>) -> Unit,
+    onSaveWatering: (Boolean, String, String) -> Unit,
     onSaveCalibration: (Map<String, String>) -> Unit,
     onSaveCalibrationLimit: (String, String) -> Boolean,
     onDismissMessage: () -> Unit
@@ -369,9 +407,9 @@ private fun PlantApp(
         }
     ) { padding ->
         when (tab) {
-            0 -> OverviewScreen(state, onConnect, Modifier.padding(padding))
+            0 -> OverviewScreen(state, onConnect, onSetMotor, Modifier.padding(padding))
             1 -> CalibrationScreen(state, onSaveCalibration, onSaveCalibrationLimit, Modifier.padding(padding))
-            else -> AlertLimitsScreen(state, onSaveLimits, Modifier.padding(padding))
+            else -> AlertLimitsScreen(state, onSaveLimits, onSaveWatering, Modifier.padding(padding))
         }
     }
 }
@@ -414,7 +452,12 @@ private fun ConnectionPill(connection: BleConnectionState) {
 }
 
 @Composable
-private fun OverviewScreen(state: PlantBleState, onConnect: () -> Unit, modifier: Modifier = Modifier) {
+private fun OverviewScreen(
+    state: PlantBleState,
+    onConnect: () -> Unit,
+    onSetMotor: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
     val connected = state.connection == BleConnectionState.CONNECTED
     val telemetry = if (connected) state.telemetry else null
     val alerts = telemetry?.let { alertIssues(it, state.config) }.orEmpty()
@@ -439,11 +482,31 @@ private fun OverviewScreen(state: PlantBleState, onConnect: () -> Unit, modifier
         }
         item {
             Card(colors = CardDefaults.cardColors(containerColor = AppColors.surface), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+                Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Pump motor", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (telemetry?.motorOn == true) "ON · manual override active" else "OFF",
+                            color = if (telemetry?.motorOn == true) AppColors.mint else AppColors.muted,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = telemetry?.motorOn == true,
+                        onCheckedChange = onSetMotor,
+                        enabled = connected
+                    )
+                }
+            }
+        }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = AppColors.surface), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(18.dp)) {
                     Text("Connection details", color = Color.White, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(10.dp))
                     DetailRow("Device", state.deviceName ?: "No device connected")
                     DetailRow("Wi-Fi on ESP32", if (!connected) "--" else if (telemetry?.wifiEnabled == true) "Enabled" else "Off")
+                    DetailRow("Pump motor", if (!connected) "--" else if (telemetry?.motorOn == true) "ON" else "OFF")
                     DetailRow("Sensor cycle", if (!connected) "Waiting for connection" else if (telemetry == null) "Waiting for data" else "Streaming every 2 seconds")
                     if (state.connection == BleConnectionState.DISCONNECTED) {
                         Spacer(Modifier.height(10.dp))
@@ -811,9 +874,17 @@ private fun CalibrationTargetCard(target: GuidedCalibrationTarget, currentValue:
 }
 
 @Composable
-private fun AlertLimitsScreen(state: PlantBleState, onSave: (Map<String, String>) -> Unit, modifier: Modifier = Modifier) {
+private fun AlertLimitsScreen(
+    state: PlantBleState,
+    onSave: (Map<String, String>) -> Unit,
+    onSaveWatering: (Boolean, String, String) -> Unit,
+    modifier: Modifier = Modifier
+) {
     val config = state.config
     val connected = state.connection == BleConnectionState.CONNECTED && state.telemetry != null
+    var wateringEnabled by remember(config.wateringEnabled, connected) { mutableStateOf(if (connected) config.wateringEnabled else false) }
+    var wateringStart by remember(config.wateringStart, connected) { mutableStateOf(if (connected) formatInput(config.wateringStart) else "--") }
+    var wateringStop by remember(config.wateringStop, connected) { mutableStateOf(if (connected) formatInput(config.wateringStop) else "--") }
     var soilLow by remember(config.soilLow, connected) { mutableStateOf(if (connected) formatInput(config.soilLow) else "--") }
     var tempLow by remember(config.tempLow, connected) { mutableStateOf(if (connected) formatInput(config.tempLow) else "--") }
     var tempHigh by remember(config.tempHigh, connected) { mutableStateOf(if (connected) formatInput(config.tempHigh) else "--") }
@@ -824,6 +895,27 @@ private fun AlertLimitsScreen(state: PlantBleState, onSave: (Map<String, String>
 
     LazyColumn(modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { PageIntro("Alert limits", "The ESP32 enters alert mode when a live value leaves these ranges. A small hysteresis band prevents alert flicker.") }
+        item {
+            CalibrationCard("Automatic watering", "The pump starts below the dry limit and stops at the wet limit. The ESP32 keeps these settings after reboot.") {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Enable automatic watering", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text(if (wateringEnabled) "Pump control is enabled" else "Pump control is disabled", color = AppColors.muted, fontSize = 12.sp)
+                    }
+                    Switch(
+                        checked = wateringEnabled,
+                        onCheckedChange = { wateringEnabled = it },
+                        enabled = connected
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                LimitFields(wateringStart, wateringStop, { wateringStart = it }, { wateringStop = it }, "%", enabled = connected)
+                Spacer(Modifier.height(10.dp))
+                SaveButton("Save watering settings", enabled = connected) {
+                    onSaveWatering(wateringEnabled, wateringStart, wateringStop)
+                }
+            }
+        }
         item {
             LimitCard("Soil moisture", "Alert when moisture falls below this value.") {
                 NumberField("Low limit", soilLow, { soilLow = it }, "%", enabled = connected)

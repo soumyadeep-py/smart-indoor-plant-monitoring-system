@@ -10,7 +10,6 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -43,6 +42,7 @@ data class PlantTelemetry(
     val light: SensorReading,
     val isAlert: Boolean,
     val wifiEnabled: Boolean,
+    val motorOn: Boolean = false,
     val alertReasons: Int? = null,
     val receivedAt: Long = System.currentTimeMillis()
 )
@@ -50,6 +50,9 @@ data class PlantTelemetry(
 data class PlantConfig(
     val soilDry: Float = 3000f,
     val soilWet: Float = 1500f,
+    val wateringEnabled: Boolean = true,
+    val wateringStart: Float = 30f,
+    val wateringStop: Float = 40f,
     val tempScale: Float = 1f,
     val tempOffset: Float = 0f,
     val humidityScale: Float = 1f,
@@ -98,6 +101,8 @@ class PlantBleManager(
     private val onEvent: (PlantBleEvent) -> Unit
 ) {
     companion object {
+        private const val DEVICE_NAME = "Smart Plant Monitor"
+        private const val MOTOR_STATUS_FLAG = 1 shl 15
         val SERVICE_UUID: UUID = UUID.fromString("7d8d2f10-2d7f-4d82-8dd7-5a5c6e001000")
         val TELEMETRY_UUID: UUID = UUID.fromString("7d8d2f10-2d7f-4d82-8dd7-5a5c6e001001")
         val CONFIG_UUID: UUID = UUID.fromString("7d8d2f10-2d7f-4d82-8dd7-5a5c6e001002")
@@ -128,7 +133,9 @@ class PlantBleManager(
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device
             val name = device.name ?: result.scanRecord?.deviceName
-            if (name == "Smart Plant Monitor") {
+            val advertisesService = result.scanRecord?.serviceUuids
+                ?.any { it.uuid == SERVICE_UUID } == true
+            if (name == DEVICE_NAME || advertisesService) {
                 stopScan()
                 connect(device)
             }
@@ -228,11 +235,10 @@ class PlantBleManager(
         stopScan()
         scanner = localAdapter.bluetoothLeScanner
         emitConnection(BleConnectionState.SCANNING, true)
-        // The ESP32 advertises its device name; filtering by name also works with
-        // firmware builds that do not place the custom service UUID in the ADV packet.
-        val filter = ScanFilter.Builder().setDeviceName("Smart Plant Monitor").build()
+        // Do not use a name-only ScanFilter: Android may receive the ESP32 name
+        // only in scan response data. The callback accepts the name or service UUID.
         val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
-        scanner?.startScan(listOf(filter), settings, scanCallback)
+        scanner?.startScan(null, settings, scanCallback)
         mainHandler.postDelayed(scanStop, SCAN_TIME_MS)
     }
 
@@ -299,7 +305,8 @@ class PlantBleManager(
 
     private fun requestAllConfig() {
         listOf(
-            "soildry", "soilwet", "tempscale", "tempoffset", "humscale", "humoffset",
+            "soildry", "soilwet", "motor", "waterenabled", "waterstart", "waterstop",
+            "tempscale", "tempoffset", "humscale", "humoffset",
             "lightscale", "lightoffset", "soillow", "templow", "temphigh", "humlow",
             "humhigh", "lightlow", "lighthigh"
         ).forEach { key -> configCommands.addLast("get=$key") }
@@ -340,11 +347,13 @@ class PlantBleManager(
         val protocolVersion = value[0].toInt() and 0xFF
         if (protocolVersion !in 1..2) return null
         val flags = value[1].toInt() and 0xFF
-        val alertReasons = if (protocolVersion >= 2) {
+        val rawAlertReasons = if (protocolVersion >= 2) {
             (value[2].toInt() and 0xFF) or ((value[3].toInt() and 0xFF) shl 8)
         } else {
             null
         }
+        val motorOn = rawAlertReasons?.let { it and MOTOR_STATUS_FLAG != 0 } ?: false
+        val alertReasons = rawAlertReasons?.and(MOTOR_STATUS_FLAG.inv())
         fun floatAt(offset: Int): Float? {
             val number = ByteBuffer.wrap(value, offset, 4).order(ByteOrder.LITTLE_ENDIAN).float
             return number.takeUnless { it.isNaN() || it.isInfinite() }
@@ -362,6 +371,7 @@ class PlantBleManager(
             light = SensorReading(floatAt(16), stateAt(6)),
             isAlert = flags and 0x01 != 0,
             wifiEnabled = flags and 0x02 != 0,
+            motorOn = motorOn,
             alertReasons = alertReasons
         )
     }
@@ -380,6 +390,9 @@ class PlantBleManager(
         latestConfig = when (key) {
             "soildry" -> latestConfig.copy(soilDry = value)
             "soilwet" -> latestConfig.copy(soilWet = value)
+            "waterenabled" -> latestConfig.copy(wateringEnabled = value >= 0.5f)
+            "waterstart" -> latestConfig.copy(wateringStart = value)
+            "waterstop" -> latestConfig.copy(wateringStop = value)
             "tempscale" -> latestConfig.copy(tempScale = value)
             "tempoffset" -> latestConfig.copy(tempOffset = value)
             "humscale" -> latestConfig.copy(humidityScale = value)

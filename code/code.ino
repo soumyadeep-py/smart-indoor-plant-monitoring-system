@@ -29,6 +29,7 @@
 #define RGB_G_PIN      26
 #define RGB_B_PIN      33
 #define BUZZER_PIN     14
+#define PUMP_PIN       5
 // ============================================================
 //                         OLED
 // ============================================================
@@ -208,6 +209,31 @@ float LIGHT_ALERT_LOW = 100.0;
 float LIGHT_ALERT_HIGH = 2000.0;
 float LIGHT_CLEAR_LOW = 150.0;
 float LIGHT_CLEAR_HIGH = 1800.0;
+// ---------------- AUTOMATIC WATERING ----------------
+const bool PUMP_ACTIVE_HIGH = true;
+const float DEFAULT_WATER_START_PERCENT = 30.0;
+const float DEFAULT_WATER_STOP_PERCENT = 40.0;
+float waterStartPercent = DEFAULT_WATER_START_PERCENT;
+float waterStopPercent = DEFAULT_WATER_STOP_PERCENT;
+bool wateringEnabled = true;
+bool pumpOn = false;
+bool manualMotorOn = false;
+bool wateringCycleActive = false;
+uint8_t drySampleCount = 0;
+uint8_t pulsesThisCycle = 0;
+unsigned long pumpStartedAt = 0;
+unsigned long nextWateringDecisionAt = 0;
+unsigned long lastWateringCycleAt = 0;
+unsigned long lastWateringSoilSampleAt = 0;
+unsigned long manualMotorStartedAt = 0;
+const uint8_t DRY_CONFIRM_SAMPLES = 3;
+const unsigned long WATERING_SAMPLE_INTERVAL = 10000UL;
+const unsigned long PUMP_PULSE_TIME = 2000UL;
+const unsigned long WATER_ABSORB_TIME = 120000UL;
+const uint8_t MAX_WATERING_PULSES = 3;
+const unsigned long MIN_WATERING_INTERVAL = 30UL * 60UL * 1000UL;
+const unsigned long MANUAL_MOTOR_MAX_RUNTIME = 30000UL;
+const uint16_t MOTOR_STATUS_FLAG = 1 << 15;
 // ============================================================
 //                        BLE APP PROTOCOL
 // ============================================================
@@ -252,6 +278,7 @@ void printCalibrationAndAlertSettings();
 void updateBLEConfigurationValue(const String& value);
 bool applyBLEConfiguration(const String& command, String& response);
 void bleTask();
+void wateringTask();
 // ============================================================
 //                        OLED SLIDESHOW
 // ============================================================
@@ -622,6 +649,108 @@ void readSoil() {
 void saveCalibrationValue(const char* key, float value) {
   calibrationPreferences.putFloat(key, value);
 }
+void setPump(bool on) {
+  pumpOn = on;
+  digitalWrite(PUMP_PIN, (on == PUMP_ACTIVE_HIGH) ? HIGH : LOW);
+}
+bool wateringTimeReached(unsigned long now, unsigned long deadline) {
+  return static_cast<long>(now - deadline) >= 0;
+}
+void stopWateringCycle(const char* reason) {
+  setPump(false);
+  wateringCycleActive = false;
+  pulsesThisCycle = 0;
+  nextWateringDecisionAt = millis() + MIN_WATERING_INTERVAL;
+  Serial.print("Watering cycle stopped: ");
+  Serial.println(reason);
+}
+void startPumpPulse(unsigned long now) {
+  setPump(true);
+  pumpStartedAt = now;
+  pulsesThisCycle++;
+  Serial.print("Pump ON, pulse ");
+  Serial.println(pulsesThisCycle);
+}
+void wateringTask() {
+  const unsigned long now = millis();
+
+  if (manualMotorOn) {
+    if (now - manualMotorStartedAt >= MANUAL_MOTOR_MAX_RUNTIME) {
+      manualMotorOn = false;
+      setPump(false);
+      Serial.println("Manual motor timeout; pump OFF.");
+    }
+    return;
+  }
+
+  if (!wateringEnabled && (pumpOn || wateringCycleActive)) {
+    setPump(false);
+    wateringCycleActive = false;
+    drySampleCount = 0;
+    Serial.println("Automatic watering disabled; pump OFF.");
+  }
+
+  // A pump pulse is always bounded, even if the sensor or BLE is unavailable.
+  if (pumpOn && now - pumpStartedAt >= PUMP_PULSE_TIME) {
+    setPump(false);
+    nextWateringDecisionAt = now + WATER_ABSORB_TIME;
+    Serial.println("Pump OFF; waiting for water to absorb.");
+  }
+
+  if (now - lastWateringSoilSampleAt < WATERING_SAMPLE_INTERVAL) return;
+  lastWateringSoilSampleAt = now;
+
+  if (!wateringEnabled || soilState == SENSOR_NOT_FOUND ||
+      soilState == SENSOR_FAULT || isnan(soilPercent)) {
+    drySampleCount = 0;
+    if (wateringEnabled && (soilState == SENSOR_NOT_FOUND ||
+                            soilState == SENSOR_FAULT || isnan(soilPercent))) {
+      setPump(false);
+      wateringCycleActive = false;
+    }
+    return;
+  }
+
+  Serial.print("Watering moisture check: ");
+  Serial.print(soilPercent, 1);
+  Serial.println("%");
+
+  if (wateringCycleActive && soilPercent >= waterStopPercent) {
+    stopWateringCycle("target moisture reached");
+    return;
+  }
+
+  if (soilPercent < waterStartPercent) {
+    if (drySampleCount < DRY_CONFIRM_SAMPLES) drySampleCount++;
+  } else {
+    drySampleCount = 0;
+  }
+
+  const bool cooldownOver = wateringTimeReached(now, nextWateringDecisionAt);
+  const bool intervalOver = lastWateringCycleAt == 0 ||
+      now - lastWateringCycleAt >= MIN_WATERING_INTERVAL;
+
+  if (!wateringCycleActive) {
+    if (drySampleCount >= DRY_CONFIRM_SAMPLES && cooldownOver && intervalOver) {
+      wateringCycleActive = true;
+      pulsesThisCycle = 0;
+      lastWateringCycleAt = now;
+      Serial.println("Dry soil confirmed; starting watering cycle.");
+      startPumpPulse(now);
+    }
+    return;
+  }
+
+  if (!pumpOn && cooldownOver) {
+    if (soilPercent >= waterStartPercent) {
+      stopWateringCycle("soil is no longer dry");
+    } else if (pulsesThisCycle >= MAX_WATERING_PULSES) {
+      stopWateringCycle("maximum pulses reached");
+    } else {
+      startPumpPulse(now);
+    }
+  }
+}
 float calibrationLiveValue() {
   if (calibrationTarget == 0) return analogRead(SOIL_PIN);
   if (calibrationTarget == 1) return temperature;
@@ -825,6 +954,7 @@ void printCalibrationAndAlertSettings() {
 bool bleConfigValueForKey(const String& key, String& response) {
   if (key == "soildry") response = "soilDry=" + bleFloat(soilDryRaw);
   else if (key == "soilwet") response = "soilWet=" + bleFloat(soilWetRaw);
+  else if (key == "motor") response = "motor=" + String(pumpOn ? 1 : 0);
   else if (key == "tempscale") response = "tempScale=" + bleFloat(tempScale, 2);
   else if (key == "tempoffset") response = "tempOffset=" + bleFloat(tempOffset, 1);
   else if (key == "humscale") response = "humScale=" + bleFloat(humidityScale, 2);
@@ -832,6 +962,9 @@ bool bleConfigValueForKey(const String& key, String& response) {
   else if (key == "lightscale") response = "lightScale=" + bleFloat(lightScale, 2);
   else if (key == "lightoffset") response = "lightOffset=" + bleFloat(lightOffset, 1);
   else if (key == "soillow") response = "soilLow=" + bleFloat(SOIL_ALERT_LOW);
+  else if (key == "waterenabled") response = "waterEnabled=" + String(wateringEnabled ? 1 : 0);
+  else if (key == "waterstart") response = "waterStart=" + bleFloat(waterStartPercent);
+  else if (key == "waterstop") response = "waterStop=" + bleFloat(waterStopPercent);
   else if (key == "templow") response = "tempLow=" + bleFloat(TEMP_ALERT_LOW);
   else if (key == "temphigh") response = "tempHigh=" + bleFloat(TEMP_ALERT_HIGH);
   else if (key == "humlow") response = "humLow=" + bleFloat(HUM_ALERT_LOW);
@@ -860,6 +993,20 @@ bool setBLEConfigValue(const String& key, float value, String& response) {
     }
     soilWetRaw = value;
     saveCalibrationValue("soilWet", value);
+  } else if (key == "motor") {
+    if (value != 0.0 && value != 1.0) { response = "ERR:motor"; return false; }
+    manualMotorOn = value >= 0.5;
+    wateringCycleActive = false;
+    drySampleCount = 0;
+    pulsesThisCycle = 0;
+    if (manualMotorOn) {
+      manualMotorStartedAt = millis();
+      setPump(true);
+      Serial.println("Manual motor ON from BLE.");
+    } else {
+      setPump(false);
+      Serial.println("Manual motor OFF from BLE.");
+    }
   } else if (key == "tempscale") {
     if (value < 0.1 || value > 10.0) { response = "ERR:tempScale"; return false; }
     tempScale = value;
@@ -889,6 +1036,23 @@ bool setBLEConfigValue(const String& key, float value, String& response) {
     SOIL_ALERT_LOW = value;
     // ESP32 Preferences/NVS keys are limited to 15 characters.
     saveCalibrationValue("soilLow", value);
+  } else if (key == "waterenabled") {
+    if (value != 0.0 && value != 1.0) { response = "ERR:waterEnabled"; return false; }
+    wateringEnabled = value >= 0.5;
+    calibrationPreferences.putBool("waterEnabled", wateringEnabled);
+    if (!wateringEnabled) {
+      setPump(false);
+      wateringCycleActive = false;
+      drySampleCount = 0;
+    }
+  } else if (key == "waterstart") {
+    if (value < 0.0 || value >= waterStopPercent) { response = "ERR:waterStart"; return false; }
+    waterStartPercent = value;
+    saveCalibrationValue("waterStart", value);
+  } else if (key == "waterstop") {
+    if (value <= waterStartPercent || value > 100.0) { response = "ERR:waterStop"; return false; }
+    waterStopPercent = value;
+    saveCalibrationValue("waterStop", value);
   } else if (key == "templow") {
     if (value < -40.0 || value >= TEMP_ALERT_HIGH) { response = "ERR:tempLow"; return false; }
     TEMP_ALERT_LOW = value;
@@ -958,6 +1122,7 @@ void buildBLESensorPacket(uint8_t packet[20]) {
     (sensorStateToBLE(ahtState) << 4) |
     (sensorStateToBLE(lightState) << 6);
   uint16_t alertReasons = currentAlertReasons();
+  if (pumpOn) alertReasons |= MOTOR_STATUS_FLAG;
   packet[2] = alertReasons & 0xFF;
   packet[3] = (alertReasons >> 8) & 0xFF;
   memcpy(packet + 4, &soilPercent, sizeof(float));
@@ -1032,6 +1197,9 @@ void initBLE() {
   );
   bleAlertCharacteristic->addDescriptor(new BLE2902());
   bleService->start();
+  BLEAdvertising* advertising = BLEDevice::getAdvertising();
+  advertising->addServiceUUID(BLE_SERVICE_UUID);
+  advertising->setScanResponse(true);
   BLEDevice::startAdvertising();
   Serial.println("BLE ready: Smart Plant Monitor is advertising.");
 }
@@ -1788,6 +1956,20 @@ void handleAPI() {
     ? "true"
     : "false";
   json += ",";
+  // ----------------------------------------------------------
+  // Pump / motor
+  // ----------------------------------------------------------
+  json += "\"motor\":";
+  json += pumpOn ? "true" : "false";
+  json += ",\"motorMode\":\"";
+  if (manualMotorOn) {
+    json += "MANUAL";
+  } else if (wateringEnabled) {
+    json += "AUTOMATIC";
+  } else {
+    json += "OFF";
+  }
+  json += "\",";
   // ----------------------------------------------------------
   // Soil
   // ----------------------------------------------------------
@@ -2864,12 +3046,13 @@ void showOLED() {
   }
   else if (oledPage == 5) {
     if (wifiActive) {
-      oledCenteredText("ONLINE", 27, 2);
-      oledCenteredText("192.168.4.1", 43, 1);
+      oledCenteredText("ONLINE", 25, 2);
+      oledCenteredText(pumpOn ? "MOTOR: ON" : "MOTOR: OFF", 42, 1);
       oledCenteredText("SELECT: TURN OFF", 52, 1);
     } else {
-      oledCenteredText("OFFLINE", 27, 2);
-      oledCenteredText("SELECT: TURN ON", 48, 1);
+      oledCenteredText("OFFLINE", 25, 2);
+      oledCenteredText(pumpOn ? "MOTOR: ON" : "MOTOR: OFF", 42, 1);
+      oledCenteredText("SELECT: TURN ON", 52, 1);
     }
   }
   if (oledTransitionActive) {
@@ -3029,6 +3212,18 @@ void setup() {
   tempOffset = calibrationPreferences.getFloat("tempOffset", tempOffset);
   lightScale = calibrationPreferences.getFloat("lightScale", lightScale);
   lightOffset = calibrationPreferences.getFloat("lightOffset", lightOffset);
+  wateringEnabled = calibrationPreferences.getBool("waterEnabled", wateringEnabled);
+  waterStartPercent = calibrationPreferences.getFloat("waterStart", waterStartPercent);
+  waterStopPercent = calibrationPreferences.getFloat("waterStop", waterStopPercent);
+  if (isnan(waterStartPercent) || isinf(waterStartPercent) ||
+      isnan(waterStopPercent) || isinf(waterStopPercent) ||
+      waterStartPercent < 0.0 || waterStartPercent >= waterStopPercent ||
+      waterStopPercent > 100.0) {
+    waterStartPercent = DEFAULT_WATER_START_PERCENT;
+    waterStopPercent = DEFAULT_WATER_STOP_PERCENT;
+    calibrationPreferences.putFloat("waterStart", waterStartPercent);
+    calibrationPreferences.putFloat("waterStop", waterStopPercent);
+  }
   updateAlertClearLimits();
   printCalibrationAndAlertSettings();
   Serial.println();
@@ -3069,6 +3264,8 @@ void setup() {
     BUZZER_PIN,
     OUTPUT
   );
+  pinMode(PUMP_PIN, OUTPUT);
+  setPump(false);
   setRGB(
     false,
     false,
@@ -3296,6 +3493,8 @@ void loop() {
   else {
     alertSensorTask();
   }
+  // Watering uses the same calibrated soil value as the monitoring system.
+  wateringTask();
   // Take calibration samples after the regular sensor update so the first
   // sample is also a fresh reading from the connected sensor.
   calibrationTask();

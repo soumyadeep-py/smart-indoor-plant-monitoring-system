@@ -26,6 +26,7 @@ object MonitorServiceContract {
     const val EXTRA_SCANNING = "scanning"
     const val EXTRA_IS_ALERT = "is_alert"
     const val EXTRA_WIFI = "wifi"
+    const val EXTRA_MOTOR = "motor"
     const val EXTRA_ALERT_REASONS = "alert_reasons"
     const val EXTRA_KEY = "key"
     const val EXTRA_VALUE = "value"
@@ -242,6 +243,7 @@ class PlantMonitorService : Service() {
             putReading("light", telemetry.light)
             putExtra(MonitorServiceContract.EXTRA_IS_ALERT, telemetry.isAlert)
             putExtra(MonitorServiceContract.EXTRA_WIFI, telemetry.wifiEnabled)
+            putExtra(MonitorServiceContract.EXTRA_MOTOR, telemetry.motorOn)
             telemetry.alertReasons?.let {
                 putExtra(MonitorServiceContract.EXTRA_ALERT_REASONS, it)
             }
@@ -257,6 +259,9 @@ class PlantMonitorService : Service() {
         sendMonitorBroadcast(Intent(MonitorServiceContract.ACTION_CONFIG).apply {
             putExtra("config_soilDry", config.soilDry)
             putExtra("config_soilWet", config.soilWet)
+            putExtra("config_wateringEnabled", config.wateringEnabled)
+            putExtra("config_wateringStart", config.wateringStart)
+            putExtra("config_wateringStop", config.wateringStop)
             putExtra("config_tempScale", config.tempScale)
             putExtra("config_tempOffset", config.tempOffset)
             putExtra("config_humidityScale", config.humidityScale)

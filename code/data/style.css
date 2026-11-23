@@ -99,7 +99,7 @@ body {
     display: grid;
 
     grid-template-columns:
-        repeat(2, 1fr);
+        repeat(3, 1fr);
 
     gap: 15px;
 
@@ -135,6 +135,14 @@ body {
 
 .status.alert {
     color: #e74c3c;
+}
+
+.status.on {
+    color: #218c4e;
+}
+
+.status.off {
+    color: #777;
 }
 
 

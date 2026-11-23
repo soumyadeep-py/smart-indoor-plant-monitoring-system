@@ -24,6 +24,8 @@ The system is designed to reduce unnecessary sensor polling by operating the sen
 - 📲 Native Android app for live readings over Bluetooth Low Energy
 - 🧪 In-app calibration for soil, temperature, humidity, and light sensors
 - 🎚️ User-configurable low/high alert limits
+- 🚿 Android control for automatic watering enable/disable and moisture limits
+- 🎛️ Manual motor switch in the Android app with OLED and web status
 - 🔁 Continuous alert-state evaluation and automatic return to normal mode
 - 🧠 Per-sensor alert cause tracking so unrelated sensors do not hold the system in alert mode
 - 🟢 Green RGB LED for normal operation, 🔴 red for active plant alerts, and 🔵 blue for sensor problems
@@ -74,6 +76,39 @@ Only the sensor conditions that actually caused the alert are latched. Once thos
 | RGB LED - Blue | GPIO 33 |
 | Passive Buzzer | GPIO 14 |
 | OLED I2C Address | 0x3C |
+
+### Pump driver connection
+
+The current `code/code.ino` defaults to an ESP32-WROOM-32 setup:
+
+| Component | Default pin |
+|---|---:|
+| Soil moisture ADC | GPIO 34 |
+| Pump transistor control | GPIO 5 |
+
+GPIO 5 in the sketch is the signal to the transistor base/gate; it does not
+power the pump directly. GPIO 5 is a boot-strapping pin, so if it affects boot
+on your particular board, move the transistor signal to another unused digital
+output and update `PUMP_PIN`.
+
+Use a separate supply for the pump, connect the pump supply ground to ESP32 GND,
+add a base/gate resistor, and place a flyback diode across a DC pump. The pump
+must never be connected directly to an ESP32 GPIO.
+
+### Watering algorithm
+
+The firmware converts the averaged soil ADC reading to a percentage using
+`SOIL_DRY_RAW` and `SOIL_WET_RAW`. It then:
+
+1. Requires three consecutive readings below 30% moisture.
+2. Turns the transistor signal on for a 2-second pump pulse.
+3. Waits 2 minutes for the water to spread before sampling again.
+4. Stops when moisture reaches 40%, when the soil is no longer below the start
+   threshold, or after three pulses.
+5. Enforces a 30-minute minimum interval between watering cycles.
+
+The pump output is forced OFF at boot and whenever soil calibration is invalid.
+Adjust the thresholds and timings in `code/code.ino` for the plant and pump.
 
 The AHT21B, BH1750 and OLED share the same I2C bus:
 
@@ -142,6 +177,25 @@ The `app` module is a native Jetpack Compose Android client for the BLE service 
 4. Connect to the device and begin monitoring the readings.
 
 The app uses the custom BLE service already defined in the firmware. Settings are sent as short `key=value` commands and are persisted by the ESP32, so calibration and alert limits remain after a reboot. The phone creates the Android notification when it receives an alert event; the ESP32 itself cannot create a phone notification directly.
+
+The **Alert limits** screen also contains **Automatic watering** controls. The
+switch enables or disables pump control, while the start and stop percentages
+define the dry and wet limits used by the watering algorithm. These values are
+sent over BLE and saved in ESP32 NVS. The current watering firmware accepts:
+
+```text
+waterenabled=0|1
+waterstart=0..100
+waterstop=0..100 (must be greater than waterstart)
+```
+
+Build a fresh Android APK after changing these controls; the previously built
+`app.apk` will not contain the new UI.
+
+The **Monitor** screen also includes a manual **Pump motor** switch. Manual
+motor control overrides automatic watering and is automatically stopped by the
+firmware after 30 seconds as a safety limit. The OLED Wi-Fi/status page and the
+web dashboard show the live motor state.
 
 ## 🌐 ESP32 web dashboard
 

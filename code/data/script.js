@@ -10,6 +10,9 @@ const systemStatus =
 const wifiStatus =
     document.getElementById("wifiStatus");
 
+const motorStatus =
+    document.getElementById("motorStatus");
+
 const systemMessage =
     document.getElementById("systemMessage");
 
@@ -239,6 +242,15 @@ function updateWiFiStatus(data) {
     }
 }
 
+function updateMotorStatus(data) {
+
+    const motorOn = data.motor === true;
+
+    motorStatus.textContent = motorOn ? "ON" : "OFF";
+    motorStatus.classList.remove("on", "off");
+    motorStatus.classList.add(motorOn ? "on" : "off");
+}
+
 
 // ======================================================
 // GET SENSOR DATA
@@ -277,6 +289,7 @@ async function updateData() {
         updateSystemMessage(data);
 
         updateWiFiStatus(data);
+        updateMotorStatus(data);
 
 
         // Sensors
